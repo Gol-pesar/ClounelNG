@@ -43,7 +43,10 @@ class Socks5ProxyServer(
     private val settings: EngineSettings,
     private val sink: TelemetrySink
 ) {
-    private val ioExecutor = Executors.newCachedThreadPool()
+    private val threadCounter = AtomicLong(1L)
+    private val ioExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "clounel-io-${threadCounter.getAndIncrement()}").apply { isDaemon = true }
+    }
     private val ioDispatcher = ioExecutor.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private var socksServerSocket: ServerSocket? = null
@@ -67,7 +70,7 @@ class Socks5ProxyServer(
 
         val socksSrv = ServerSocket().apply {
             reuseAddress = true
-            bind(InetSocketAddress(InetAddress.getByName(host), port), 256)
+            bind(InetSocketAddress(InetAddress.getByName(host), port), 512)
         }
         socksServerSocket = socksSrv
 
@@ -97,7 +100,7 @@ class Socks5ProxyServer(
             try {
                 val httpSrv = ServerSocket().apply {
                     reuseAddress = true
-                    bind(InetSocketAddress(InetAddress.getByName(host), bridgePort), 128)
+                    bind(InetSocketAddress(InetAddress.getByName(host), bridgePort), 256)
                 }
                 httpServerSocket = httpSrv
                 sink.onLog(LogLevel.INFO, "[*] HTTP CONNECT Bridge listening on $host:$bridgePort")
@@ -130,7 +133,8 @@ class Socks5ProxyServer(
     private fun tuneSocket(socket: Socket) {
         runCatching {
             socket.tcpNoDelay = settings.tcpNoDelay
-            val bufSize = profile.bufferMax.coerceIn(65536, 4194304)
+            socket.keepAlive = true
+            val bufSize = profile.bufferMax.coerceIn(65536, 1048576)
             socket.receiveBufferSize = bufSize
             socket.sendBufferSize = bufSize
         }
@@ -141,7 +145,8 @@ class Socks5ProxyServer(
         try {
             tuneSocket(client)
             client.soTimeout = 10_000
-            val input = DataInputStream(BufferedInputStream(client.getInputStream(), 65536))
+            // Small header buffer so rejected UDP/QUIC requests don't allocate 64KB
+            val input = DataInputStream(BufferedInputStream(client.getInputStream(), 1024))
             val output = client.getOutputStream()
 
             // 1. Greeting: VER, NMETHODS, METHODS...
@@ -195,6 +200,7 @@ class Socks5ProxyServer(
 
             relayTarget(
                 connId = connId,
+                clientSocket = client,
                 clientInput = input,
                 clientOutput = output,
                 targetHost = targetHost,
@@ -226,7 +232,7 @@ class Socks5ProxyServer(
         try {
             tuneSocket(client)
             client.soTimeout = 10_000
-            val input = BufferedInputStream(client.getInputStream(), 65536)
+            val input = BufferedInputStream(client.getInputStream(), 4096)
             val output = client.getOutputStream()
 
             val headerBytes = readHttpHeaderBlock(input) ?: return
@@ -252,6 +258,7 @@ class Socks5ProxyServer(
 
             relayTarget(
                 connId = connId,
+                clientSocket = client,
                 clientInput = input,
                 clientOutput = output,
                 targetHost = targetHost,
@@ -278,6 +285,7 @@ class Socks5ProxyServer(
 
     private suspend fun relayTarget(
         connId: Long,
+        clientSocket: Socket,
         clientInput: InputStream,
         clientOutput: OutputStream,
         targetHost: String,
@@ -288,18 +296,38 @@ class Socks5ProxyServer(
     ) {
         when (profile.mode) {
             TunnelMode.CL2_WSS -> relayViaCl2Wss(
-                connId, clientInput, clientOutput, targetHost, targetPort, protocolLabel,
-                sendSocksSuccess, sendFailure
+                connId, clientSocket, clientInput, clientOutput, targetHost, targetPort,
+                protocolLabel, sendSocksSuccess, sendFailure
             )
             TunnelMode.DIRECT_SOCKS5 -> relayViaDirectSocks5(
-                connId, clientInput, clientOutput, targetHost, targetPort, protocolLabel,
-                sendSocksSuccess, sendFailure
+                connId, clientInput, clientOutput, targetHost, targetPort,
+                protocolLabel, sendSocksSuccess, sendFailure
             )
         }
     }
 
+    private suspend fun performCl2Handshake(
+        ws: Cl2WebSocketTransport,
+        targetHost: String,
+        targetPort: Int,
+        ackBuf: Cl2WebSocketTransport.FrameBuffer
+    ): ByteArray {
+        val (initPacket, key) = Cl2Crypto.buildInit(profile.uuid, targetHost, targetPort)
+        if (!ws.sendBinary(initPacket)) {
+            throw IOException("Failed sending Cl2 init frame")
+        }
+        if (!ws.readFrameInto(ackBuf, timeoutMs = 10_000)) {
+            throw IOException("Cl2 handshake closed before ACK")
+        }
+        if (!Cl2Crypto.verifyAck(ackBuf.data, ackBuf.length, key)) {
+            throw IOException("Invalid Cl2 HMAC handshake ACK from ${profile.workerHost}")
+        }
+        return key
+    }
+
     private suspend fun relayViaCl2Wss(
         connId: Long,
+        clientSocket: Socket,
         clientInput: InputStream,
         clientOutput: OutputStream,
         targetHost: String,
@@ -311,7 +339,10 @@ class Socks5ProxyServer(
         val startTime = System.currentTimeMillis()
         var ws: Cl2WebSocketTransport? = null
         try {
-            ws = Cl2WebSocketTransport.connect(
+            val chunkSize = profile.maxChunk.coerceIn(16384, 262144)
+            val frameBuf = Cl2WebSocketTransport.FrameBuffer(maxOf(chunkSize, 131072))
+
+            var candidate = Cl2WebSocketTransport.connect(
                 workerHost = profile.workerHost,
                 workerUrl = profile.workerUrl,
                 cleanIp = profile.cleanIp,
@@ -319,56 +350,50 @@ class Socks5ProxyServer(
                 bufferMax = profile.bufferMax,
                 tcpNoDelay = settings.tcpNoDelay,
                 autoFallbackCleanIp = settings.autoFallbackCleanIp,
+                useStandbyPool = true,
                 onLog = { msg -> sink.onLog(LogLevel.WARN, msg) }
             )
+            ws = candidate
 
-            val (initPacket, key) = Cl2Crypto.buildInit(profile.uuid, targetHost, targetPort)
-            if (!ws.sendBinary(initPacket)) {
-                throw IOException("Failed sending Cl2 init frame")
+            val key = try {
+                performCl2Handshake(candidate, targetHost, targetPort, frameBuf)
+            } catch (e: Exception) {
+                if (!candidate.fromPool) throw e
+                // Pooled WebSocket went stale before first init frame; reconnect fresh once
+                candidate.close()
+                candidate = Cl2WebSocketTransport.connectFresh(
+                    workerHost = profile.workerHost,
+                    workerUrl = profile.workerUrl,
+                    cleanIp = profile.cleanIp,
+                    subprotocol = profile.subprotocol,
+                    bufferMax = profile.bufferMax,
+                    tcpNoDelay = settings.tcpNoDelay,
+                    autoFallbackCleanIp = settings.autoFallbackCleanIp,
+                    onLog = { msg -> sink.onLog(LogLevel.WARN, msg) }
+                )
+                ws = candidate
+                performCl2Handshake(candidate, targetHost, targetPort, frameBuf)
             }
 
-            val ack = ws.readMessage(timeoutMs = 10_000)
-                ?: throw IOException("Cl2 handshake closed before ACK")
-            if (!Cl2Crypto.verifyAck(ack, key)) {
-                throw IOException("Invalid Cl2 HMAC handshake ACK from ${profile.workerHost}")
-            }
-
+            val activeWs = candidate
             val handshakeMs = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
             sendSocksSuccess()
             sink.onConnectionOpened(connId, targetHost, targetPort, protocolLabel, handshakeMs)
             sink.onLog(LogLevel.INFO, "$protocolLabel $targetHost:$targetPort (${handshakeMs}ms)")
 
-            val chunkSize = profile.maxChunk.coerceIn(16384, 262144)
-
             coroutineScope {
-                val upJob = launch {
-                    val buffer = ByteArray(chunkSize)
-                    try {
-                        while (isActive) {
-                            val read = clientInput.read(buffer)
-                            if (read <= 0) break
-                            Cl2Crypto.xorInPlace(buffer, read, key)
-                            if (!ws.sendBinary(buffer, 0, read)) break
-                            sink.onBytesTransferred(connId, read.toLong(), 0L)
-                        }
-                    } catch (_: Exception) {
-                        // Upstream closed
-                    } finally {
-                        ws.close()
-                    }
-                }
-
                 val downJob = launch {
                     try {
                         while (isActive) {
-                            val msg = ws.readMessage() ?: break
-                            if (msg.isNotEmpty()) {
-                                Cl2Crypto.xorInPlace(msg, msg.size, key)
-                                clientOutput.write(msg)
-                                if (!ws.hasBufferedInput()) {
+                            if (!activeWs.readFrameInto(frameBuf)) break
+                            val len = frameBuf.length
+                            if (len > 0) {
+                                Cl2Crypto.xorInPlace(frameBuf.data, len, key)
+                                clientOutput.write(frameBuf.data, 0, len)
+                                if (!activeWs.hasBufferedInput()) {
                                     clientOutput.flush()
                                 }
-                                sink.onBytesTransferred(connId, 0L, msg.size.toLong())
+                                sink.onBytesTransferred(connId, 0L, len.toLong())
                             }
                         }
                     } catch (_: Exception) {
@@ -376,10 +401,28 @@ class Socks5ProxyServer(
                     } finally {
                         runCatching { clientOutput.flush() }
                         runCatching { clientOutput.close() }
+                        runCatching { clientSocket.close() }
                     }
                 }
 
-                upJob.join()
+                // Run upload loop directly on the current coroutine; do not close ws on normal client EOF
+                // (half-close) so downJob can finish delivering the server response.
+                val upBuffer = ByteArray(chunkSize)
+                try {
+                    while (isActive) {
+                        val read = clientInput.read(upBuffer)
+                        if (read <= 0) break
+                        Cl2Crypto.xorInPlace(upBuffer, read, key)
+                        if (!activeWs.sendBinary(upBuffer, 0, read)) {
+                            activeWs.close()
+                            break
+                        }
+                        sink.onBytesTransferred(connId, read.toLong(), 0L)
+                    }
+                } catch (_: Exception) {
+                    // Client closed or reset
+                }
+
                 downJob.join()
             }
         } catch (e: Exception) {

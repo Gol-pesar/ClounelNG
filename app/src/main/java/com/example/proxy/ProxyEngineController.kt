@@ -92,6 +92,17 @@ object ProxyEngineController : TelemetrySink {
         try {
             srv.start()
             server = srv
+            if (profile.mode == TunnelMode.CL2_WSS) {
+                Cl2WebSocketTransport.warmStandbyPool(
+                    workerHost = profile.workerHost,
+                    workerUrl = profile.workerUrl,
+                    cleanIp = profile.cleanIp,
+                    subprotocol = profile.subprotocol,
+                    bufferMax = profile.bufferMax,
+                    tcpNoDelay = settings.tcpNoDelay,
+                    autoFallbackCleanIp = settings.autoFallbackCleanIp
+                )
+            }
             val listenAddr = "${srv.bindHost}:${srv.socksPort}"
             val httpAddr = srv.httpBridgePort?.let { "${srv.bindHost}:$it" }
             val endpoint = if (profile.mode == TunnelMode.CL2_WSS) {
@@ -133,6 +144,7 @@ object ProxyEngineController : TelemetrySink {
         tickerJob = null
         server?.stop()
         server = null
+        Cl2WebSocketTransport.clearStandbyPool()
         activeConnMap.clear()
         _telemetry.update {
             it.copy(

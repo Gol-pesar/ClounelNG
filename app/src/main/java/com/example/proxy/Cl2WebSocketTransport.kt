@@ -1,7 +1,10 @@
 package com.example.proxy
 
 import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -16,8 +19,10 @@ import java.net.URI
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLContext
@@ -25,19 +30,40 @@ import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocket
 
 /**
- * High-speed direct RFC 6455 WebSocket over TLS (no permessage-deflate overhead,
- * shared TLS session cache, Clean IP direct socket connect, and SNI preservation)
- * matching Cl2_82497904.py wire semantics directly.
+ * Ultra-fast direct RFC 6455 WebSocket-over-TLS transport with:
+ * - Zero-allocation FrameBuffer streaming (no GC churn during high-speed downloads)
+ * - Pre-warmed standby WebSocket pool (eliminates 3-4 RTT TCP+TLS+Upgrade startup latency)
+ * - Shared TLS session cache (1-RTT session resumption)
+ * - Zero permessage-deflate compression overhead (matching Python compression=None)
+ * - 30s DNS cache and Clean IP SNI/Host preservation
  */
 class Cl2WebSocketTransport private constructor(
     private val socket: Socket,
     private val binIn: DataInputStream,
     private val bufOut: BufferedOutputStream,
-    val usedCleanIp: Boolean
+    val usedCleanIp: Boolean,
+    val fromPool: Boolean = false
 ) {
+    class FrameBuffer(initialSize: Int = 131072) {
+        var data: ByteArray = ByteArray(initialSize)
+        var length: Int = 0
+
+        fun ensureCapacity(needed: Int): ByteArray {
+            if (data.size < needed) {
+                data = ByteArray(maxOf(needed, data.size * 2))
+            }
+            return data
+        }
+    }
+
     private val writeLock = Any()
     private val closed = AtomicBoolean(false)
     private var sendScratch = ByteArray(65536 + 16)
+    private val createdAtMs = System.currentTimeMillis()
+
+    fun isExpiredForPool(): Boolean {
+        return closed.get() || socket.isClosed || (System.currentTimeMillis() - createdAtMs) > POOL_MAX_AGE_MS
+    }
 
     fun sendBinary(data: ByteArray, offset: Int = 0, byteCount: Int = data.size): Boolean {
         if (closed.get() || socket.isClosed) return false
@@ -52,18 +78,22 @@ class Cl2WebSocketTransport private constructor(
         }
     }
 
-    fun readMessage(timeoutMs: Int = 0): ByteArray? {
+    /**
+     * Reads one complete WebSocket message directly into [frameBuf] with zero heap allocation
+     * on the fast path. Returns false cleanly on EOF/CLOSE.
+     */
+    fun readFrameInto(frameBuf: FrameBuffer, timeoutMs: Int = 0): Boolean {
         val prevTimeout = if (timeoutMs > 0) socket.soTimeout else 0
         if (timeoutMs > 0) {
             socket.soTimeout = timeoutMs
         }
         try {
-            var fragmentBuf: ByteArrayOutputStream? = null
+            var fragmentAcc: ByteArrayOutputStream? = null
             while (!closed.get()) {
                 val b0 = try {
                     binIn.readUnsignedByte()
                 } catch (_: EOFException) {
-                    return null
+                    return false
                 }
                 val b1 = binIn.readUnsignedByte()
 
@@ -87,52 +117,82 @@ class Cl2WebSocketTransport private constructor(
                     null
                 }
 
-                val payload = ByteArray(len)
-                if (len > 0) {
-                    binIn.readFully(payload)
-                    if (maskKey != null) {
-                        for (i in 0 until len) {
-                            payload[i] = (payload[i].toInt() xor maskKey[i and 3].toInt()).toByte()
-                        }
-                    }
-                }
-
                 when (opcode) {
                     OPCODE_CLOSE -> {
+                        if (len > 0) {
+                            val drain = ByteArray(len)
+                            binIn.readFully(drain)
+                        }
                         close()
-                        return null
+                        return false
                     }
                     OPCODE_PING -> {
+                        val pingPayload = ByteArray(len)
+                        if (len > 0) {
+                            binIn.readFully(pingPayload)
+                            if (maskKey != null) unmask(pingPayload, len, maskKey)
+                        }
                         runCatching {
                             synchronized(writeLock) {
-                                writeFrameLocked(OPCODE_PONG, payload, 0, payload.size)
+                                writeFrameLocked(OPCODE_PONG, pingPayload, 0, len)
                             }
                         }
                     }
                     OPCODE_PONG -> {
-                        // Ignore control PONG
+                        if (len > 0) {
+                            val drain = ByteArray(len)
+                            binIn.readFully(drain)
+                        }
                     }
                     OPCODE_BINARY, OPCODE_TEXT, OPCODE_CONTINUATION -> {
-                        if (fin && fragmentBuf == null) {
-                            return payload
+                        if (fin && fragmentAcc == null) {
+                            val buf = frameBuf.ensureCapacity(len)
+                            if (len > 0) {
+                                binIn.readFully(buf, 0, len)
+                                if (maskKey != null) unmask(buf, len, maskKey)
+                            }
+                            frameBuf.length = len
+                            return true
                         }
-                        val acc = fragmentBuf ?: ByteArrayOutputStream(len * 2).also { fragmentBuf = it }
-                        if (len > 0) acc.write(payload)
+                        val acc = fragmentAcc ?: ByteArrayOutputStream(maxOf(len * 2, 16384)).also {
+                            fragmentAcc = it
+                        }
+                        if (len > 0) {
+                            val part = ByteArray(len)
+                            binIn.readFully(part)
+                            if (maskKey != null) unmask(part, len, maskKey)
+                            acc.write(part)
+                        }
                         if (fin) {
-                            return acc.toByteArray()
+                            val combined = acc.toByteArray()
+                            val buf = frameBuf.ensureCapacity(combined.size)
+                            if (combined.isNotEmpty()) {
+                                System.arraycopy(combined, 0, buf, 0, combined.size)
+                            }
+                            frameBuf.length = combined.size
+                            return true
                         }
                     }
                     else -> {
-                        // Ignore unknown non-control opcodes
+                        if (len > 0) {
+                            val drain = ByteArray(len)
+                            binIn.readFully(drain)
+                        }
                     }
                 }
             }
-            return null
+            return false
         } finally {
             if (timeoutMs > 0) {
                 runCatching { socket.soTimeout = prevTimeout }
             }
         }
+    }
+
+    fun readMessage(timeoutMs: Int = 0): ByteArray? {
+        val fb = FrameBuffer(4096)
+        if (!readFrameInto(fb, timeoutMs)) return null
+        return fb.data.copyOf(fb.length)
     }
 
     fun hasBufferedInput(): Boolean {
@@ -154,6 +214,12 @@ class Cl2WebSocketTransport private constructor(
                 }
             }
             runCatching { socket.close() }
+        }
+    }
+
+    private fun unmask(buf: ByteArray, len: Int, maskKey: ByteArray) {
+        for (i in 0 until len) {
+            buf[i] = (buf[i].toInt() xor maskKey[i and 3].toInt()).toByte()
         }
     }
 
@@ -237,9 +303,26 @@ class Cl2WebSocketTransport private constructor(
         private const val OPCODE_PONG = 0xA
         private const val WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         private const val DNS_CACHE_TTL_MS = 30_000L
+        private const val POOL_MAX_SIZE = 3
+        private const val POOL_MAX_AGE_MS = 16_000L
+
+        private data class PoolKey(
+            val workerHost: String,
+            val workerUrl: String,
+            val cleanIp: String,
+            val subprotocol: String,
+            val bufferMax: Int,
+            val tcpNoDelay: Boolean
+        )
 
         private val secureRandom = SecureRandom()
         private val dnsCache = ConcurrentHashMap<String, Pair<Long, InetAddress>>()
+        private val poolScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val standbyQueue = ConcurrentLinkedDeque<Cl2WebSocketTransport>()
+        private val inflightWarmups = AtomicInteger(0)
+
+        @Volatile
+        private var currentPoolKey: PoolKey? = null
 
         private val sharedSslContext: SSLContext by lazy {
             SSLContext.getInstance("TLS").apply {
@@ -249,7 +332,127 @@ class Cl2WebSocketTransport private constructor(
             }
         }
 
+        fun clearStandbyPool() {
+            currentPoolKey = null
+            while (true) {
+                val ws = standbyQueue.pollFirst() ?: break
+                ws.close()
+            }
+        }
+
+        fun warmStandbyPool(
+            workerHost: String,
+            workerUrl: String,
+            cleanIp: String,
+            subprotocol: String,
+            bufferMax: Int,
+            tcpNoDelay: Boolean,
+            autoFallbackCleanIp: Boolean
+        ) {
+            val effectiveHost = workerHost.trim().ifBlank { ConfigShareCodec.extractHostFromWorkerUrl(workerUrl) }
+            if (effectiveHost.isBlank()) return
+            val normalizedUrl = ConfigShareCodec.normalizeWorkerUrl(workerUrl.ifBlank { "wss://$effectiveHost/" })
+            val key = PoolKey(effectiveHost, normalizedUrl, cleanIp.trim(), subprotocol.trim(), bufferMax, tcpNoDelay)
+            if (currentPoolKey != key) {
+                clearStandbyPool()
+                currentPoolKey = key
+            }
+
+            // Purge expired entries
+            while (true) {
+                val head = standbyQueue.peekFirst() ?: break
+                if (head.isExpiredForPool()) {
+                    standbyQueue.pollFirst()?.close()
+                } else {
+                    break
+                }
+            }
+
+            val deficit = POOL_MAX_SIZE - (standbyQueue.size + inflightWarmups.get())
+            if (deficit <= 0) return
+
+            repeat(deficit) {
+                if (inflightWarmups.incrementAndGet() > POOL_MAX_SIZE) {
+                    inflightWarmups.decrementAndGet()
+                    return
+                }
+                poolScope.launch {
+                    try {
+                        val ws = connectDirect(
+                            workerHost = effectiveHost,
+                            workerUrl = normalizedUrl,
+                            cleanIp = cleanIp,
+                            subprotocol = subprotocol,
+                            bufferMax = bufferMax,
+                            tcpNoDelay = tcpNoDelay,
+                            autoFallbackCleanIp = autoFallbackCleanIp,
+                            onLog = {},
+                            markFromPool = true
+                        )
+                        if (currentPoolKey == key && standbyQueue.size < POOL_MAX_SIZE) {
+                            standbyQueue.offerLast(ws)
+                        } else {
+                            ws.close()
+                        }
+                    } catch (_: Exception) {
+                        // Standby warmup is best-effort
+                    } finally {
+                        inflightWarmups.decrementAndGet()
+                    }
+                }
+            }
+        }
+
         suspend fun connect(
+            workerHost: String,
+            workerUrl: String,
+            cleanIp: String,
+            subprotocol: String,
+            bufferMax: Int,
+            tcpNoDelay: Boolean,
+            autoFallbackCleanIp: Boolean,
+            useStandbyPool: Boolean = true,
+            onLog: (String) -> Unit
+        ): Cl2WebSocketTransport = withContext(Dispatchers.IO) {
+            val effectiveHost = workerHost.trim().ifBlank { ConfigShareCodec.extractHostFromWorkerUrl(workerUrl) }
+            require(effectiveHost.isNotBlank()) { "Worker Host/URL is empty" }
+            val normalizedUrl = ConfigShareCodec.normalizeWorkerUrl(workerUrl.ifBlank { "wss://$effectiveHost/" })
+            val key = PoolKey(effectiveHost, normalizedUrl, cleanIp.trim(), subprotocol.trim(), bufferMax, tcpNoDelay)
+
+            if (useStandbyPool) {
+                if (currentPoolKey == key) {
+                    while (true) {
+                        val pooled = standbyQueue.pollFirst() ?: break
+                        if (!pooled.isExpiredForPool()) {
+                            warmStandbyPool(
+                                effectiveHost, normalizedUrl, cleanIp, subprotocol,
+                                bufferMax, tcpNoDelay, autoFallbackCleanIp
+                            )
+                            return@withContext pooled
+                        }
+                        pooled.close()
+                    }
+                }
+                warmStandbyPool(
+                    effectiveHost, normalizedUrl, cleanIp, subprotocol,
+                    bufferMax, tcpNoDelay, autoFallbackCleanIp
+                )
+            }
+
+            connectDirect(
+                workerHost = effectiveHost,
+                workerUrl = normalizedUrl,
+                cleanIp = cleanIp,
+                subprotocol = subprotocol,
+                bufferMax = bufferMax,
+                tcpNoDelay = tcpNoDelay,
+                autoFallbackCleanIp = autoFallbackCleanIp,
+                onLog = onLog,
+                markFromPool = false
+            )
+        }
+
+        suspend fun connectFresh(
             workerHost: String,
             workerUrl: String,
             cleanIp: String,
@@ -262,34 +465,82 @@ class Cl2WebSocketTransport private constructor(
             val effectiveHost = workerHost.trim().ifBlank { ConfigShareCodec.extractHostFromWorkerUrl(workerUrl) }
             require(effectiveHost.isNotBlank()) { "Worker Host/URL is empty" }
             val normalizedUrl = ConfigShareCodec.normalizeWorkerUrl(workerUrl.ifBlank { "wss://$effectiveHost/" })
-            val trimmedCleanIp = cleanIp.trim().removePrefix("[").removeSuffix("]")
-
-            if (trimmedCleanIp.isNotEmpty()) {
-                try {
-                    return@withContext connectInternal(
-                        url = normalizedUrl,
-                        workerHost = effectiveHost,
-                        overrideIp = trimmedCleanIp,
-                        subprotocol = subprotocol,
-                        bufferMax = bufferMax,
-                        tcpNoDelay = tcpNoDelay,
-                        connectTimeoutMs = if (autoFallbackCleanIp) 7_000 else 10_000
-                    )
-                } catch (e: Exception) {
-                    if (!autoFallbackCleanIp) throw e
-                    onLog("Clean IP ($trimmedCleanIp) failed (${e.message}), falling back to $effectiveHost")
-                }
-            }
-
-            connectInternal(
-                url = normalizedUrl,
+            connectDirect(
                 workerHost = effectiveHost,
-                overrideIp = null,
+                workerUrl = normalizedUrl,
+                cleanIp = cleanIp,
                 subprotocol = subprotocol,
                 bufferMax = bufferMax,
                 tcpNoDelay = tcpNoDelay,
-                connectTimeoutMs = 10_000
+                autoFallbackCleanIp = autoFallbackCleanIp,
+                onLog = onLog,
+                markFromPool = false
             )
+        }
+
+        private fun connectDirect(
+            workerHost: String,
+            workerUrl: String,
+            cleanIp: String,
+            subprotocol: String,
+            bufferMax: Int,
+            tcpNoDelay: Boolean,
+            autoFallbackCleanIp: Boolean,
+            onLog: (String) -> Unit,
+            markFromPool: Boolean
+        ): Cl2WebSocketTransport {
+            val (parsedCleanIp, overridePort) = parseCleanIpAndPort(cleanIp)
+            if (parsedCleanIp.isNotEmpty()) {
+                try {
+                    return connectInternal(
+                        url = workerUrl,
+                        workerHost = workerHost,
+                        overrideIp = parsedCleanIp,
+                        overridePort = overridePort,
+                        subprotocol = subprotocol,
+                        bufferMax = bufferMax,
+                        tcpNoDelay = tcpNoDelay,
+                        connectTimeoutMs = if (autoFallbackCleanIp) 6_000 else 10_000,
+                        markFromPool = markFromPool
+                    )
+                } catch (e: Exception) {
+                    if (!autoFallbackCleanIp) throw e
+                    onLog("Clean IP ($parsedCleanIp) failed (${e.message}), falling back to $workerHost")
+                }
+            }
+
+            return connectInternal(
+                url = workerUrl,
+                workerHost = workerHost,
+                overrideIp = null,
+                overridePort = null,
+                subprotocol = subprotocol,
+                bufferMax = bufferMax,
+                tcpNoDelay = tcpNoDelay,
+                connectTimeoutMs = 10_000,
+                markFromPool = markFromPool
+            )
+        }
+
+        private fun parseCleanIpAndPort(rawCleanIp: String): Pair<String, Int?> {
+            val trimmed = rawCleanIp.trim()
+            if (trimmed.isEmpty()) return "" to null
+            if (trimmed.startsWith("[")) {
+                val closeIdx = trimmed.indexOf(']')
+                if (closeIdx > 0) {
+                    val ip = trimmed.substring(1, closeIdx)
+                    val after = trimmed.substring(closeIdx + 1)
+                    val port = if (after.startsWith(":")) after.substring(1).toIntOrNull()?.takeIf { it in 1..65535 } else null
+                    return ip to port
+                }
+            }
+            val colonCount = trimmed.count { it == ':' }
+            if (colonCount == 1) {
+                val hostPart = trimmed.substringBefore(':')
+                val portPart = trimmed.substringAfter(':').toIntOrNull()?.takeIf { it in 1..65535 }
+                if (portPart != null) return hostPart to portPart
+            }
+            return trimmed.removePrefix("[").removeSuffix("]") to null
         }
 
         private fun resolveHostCached(host: String): InetAddress {
@@ -307,15 +558,17 @@ class Cl2WebSocketTransport private constructor(
             url: String,
             workerHost: String,
             overrideIp: String?,
+            overridePort: Int?,
             subprotocol: String,
             bufferMax: Int,
             tcpNoDelay: Boolean,
-            connectTimeoutMs: Int
+            connectTimeoutMs: Int,
+            markFromPool: Boolean
         ): Cl2WebSocketTransport {
             val uri = URI(url)
             val scheme = uri.scheme?.lowercase() ?: "wss"
             val isTls = scheme == "wss" || scheme == "https"
-            val port = if (uri.port > 0) uri.port else if (isTls) 443 else 80
+            val port = overridePort ?: if (uri.port > 0) uri.port else if (isTls) 443 else 80
             val sniHost = workerHost.ifBlank { uri.host.orEmpty() }
             val path = uri.rawPath?.ifEmpty { "/" } ?: "/"
             val pathAndQuery = if (!uri.rawQuery.isNullOrEmpty()) "$path?${uri.rawQuery}" else path
@@ -329,7 +582,7 @@ class Cl2WebSocketTransport private constructor(
             }
 
             val rawSocket = Socket()
-            val tunedBuf = bufferMax.coerceIn(131072, 4194304)
+            val tunedBuf = bufferMax.coerceIn(131072, 524288)
             runCatching {
                 rawSocket.tcpNoDelay = tcpNoDelay
                 rawSocket.keepAlive = true
@@ -410,7 +663,8 @@ class Cl2WebSocketTransport private constructor(
                 socket = socket,
                 binIn = binIn,
                 bufOut = bufOut,
-                usedCleanIp = overrideIp != null
+                usedCleanIp = overrideIp != null,
+                fromPool = markFromPool
             )
         }
 

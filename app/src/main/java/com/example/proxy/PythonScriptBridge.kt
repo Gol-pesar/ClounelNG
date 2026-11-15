@@ -12,7 +12,8 @@ object PythonScriptBridge {
 
     val DEFAULT_CL2_SCRIPT = """
 #!/usr/bin/env python3
-import asyncio, socket, struct, sys, os, hmac, hashlib
+import asyncio, collections, hashlib, hmac, os, socket, ssl, struct, sys, time
+import urllib.parse
 import websockets
 
 try:
@@ -35,10 +36,102 @@ _HEADERS_KWARG = "additional_headers" if _WS_MAJOR >= 14 else "extra_headers"
 
 BO = sys.byteorder
 _int_from_bytes = int.from_bytes
+_UUID_BYTES = UUID.encode()
+
+_POOL_SIZE = 3
+_POOL_TTL = 15.0
+_WS_POOL = collections.deque()
+_WARM_INFLIGHT = 0
+_POOL_LOCK = None
+_SSL_CTX = None
+
+def _get_ssl_ctx():
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        _SSL_CTX = ctx
+    return _SSL_CTX
+
+def _parse_clean_ip(raw):
+    s = (raw or "").strip()
+    if not s:
+        return "", None
+    if s.startswith("["):
+        end = s.find("]")
+        if end > 0:
+            ip = s[1:end]
+            rest = s[end + 1:]
+            if rest.startswith(":") and rest[1:].isdigit():
+                p = int(rest[1:])
+                if 1 <= p <= 65535:
+                    return ip, p
+            return ip, None
+    if s.count(":") == 1:
+        host, port_str = s.split(":", 1)
+        if port_str.isdigit():
+            p = int(port_str)
+            if 1 <= p <= 65535:
+                return host, p
+    return s.strip("[]"), None
+
+def _build_ws_endpoints():
+    host = WORKER_HOST.strip()
+    parsed = urllib.parse.urlsplit(WORKER_URL.strip() or f"wss://{host}/")
+    scheme = parsed.scheme or "wss"
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    default_port = 443 if scheme == "wss" else 80
+    direct_port = parsed.port or default_port
+    direct_url = urllib.parse.urlunsplit((scheme, parsed.netloc or host, path, "", ""))
+
+    clean_host, clean_port = _parse_clean_ip(CLEAN_IP)
+    clean_url = None
+    clean_headers = {}
+    if clean_host:
+        netloc_host = f"[{clean_host}]" if ":" in clean_host else clean_host
+        use_port = clean_port or direct_port
+        netloc = f"{netloc_host}:{use_port}" if use_port != default_port else netloc_host
+        clean_url = urllib.parse.urlunsplit((scheme, netloc, path, "", ""))
+        host_hdr = f"{host}:{use_port}" if use_port != default_port else host
+        clean_headers = {"Host": host_hdr}
+    return direct_url, clean_url, clean_headers
+
+def _tune_socket(sock):
+    if sock is None:
+        return
+    for opt in (
+        (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
+        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+        (socket.SOL_SOCKET, socket.SO_RCVBUF, BUFFER_MAX),
+        (socket.SOL_SOCKET, socket.SO_SNDBUF, BUFFER_MAX),
+    ):
+        try:
+            sock.setsockopt(*opt)
+        except OSError:
+            pass
+    if hasattr(socket, "TCP_QUICKACK"):
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+        except OSError:
+            pass
+
+def _tune_ws(ws):
+    try:
+        transport = getattr(ws, "transport", None)
+        if transport is not None:
+            transport.set_write_buffer_limits(high=BUFFER_MAX, low=BUFFER_MAX >> 2)
+            _tune_socket(transport.get_extra_info("socket"))
+    except Exception:
+        pass
+    return ws
 
 def derive_key(nonce):
-    tb = UUID.encode()
-    return bytes(tb[i % len(tb)] ^ nonce[i] for i in range(16))
+    tb = _UUID_BYTES or UUID.encode()
+    n = len(tb)
+    return bytes(tb[i % n] ^ nonce[i] for i in range(16))
 
 def build_init(host, port, payload=b""):
     nonce = os.urandom(16)
@@ -52,32 +145,93 @@ def build_init(host, port, payload=b""):
             hb = host.encode(); at, addr = 2, bytes([len(hb)]) + hb
     body = bytes([1]) + struct.pack("!H", port) + bytes([at]) + addr + payload
 
-    init_key_expanded = key * (len(body) // len(key)) + key[:len(body) % len(key)]
+    init_key_expanded = key * (len(body) // 16) + key[:len(body) % 16]
     enc = (_int_from_bytes(body, BO) ^ _int_from_bytes(init_key_expanded, BO)).to_bytes(len(body), BO)
     return nonce + enc + hmac.new(key, enc, hashlib.sha256).digest()[:8], key
 
-async def ws_connect():
+async def _ws_connect_fresh():
+    direct_url, clean_url, clean_headers = _build_ws_endpoints()
     kw = {
         "max_size": None,
-        "open_timeout": 15,
+        "max_queue": 64,
+        "read_limit": min(BUFFER_MAX, 1048576),
+        "write_limit": min(BUFFER_MAX, 1048576),
+        "open_timeout": 10,
+        "close_timeout": 2,
         "subprotocols": [SUBPROTO],
         "server_hostname": WORKER_HOST,
+        "ssl": _get_ssl_ctx() if direct_url.startswith("wss://") else None,
         "compression": None,
         "ping_interval": None,
     }
-    if CLEAN_IP:
-        ip = f"[{CLEAN_IP}]" if ":" in CLEAN_IP else CLEAN_IP
-        url = WORKER_URL.replace(WORKER_HOST, ip)
-        kw[_HEADERS_KWARG] = {"Host": WORKER_HOST}
+    if clean_url:
+        kw[_HEADERS_KWARG] = clean_headers
         try:
-            return await websockets.connect(url, **kw)
+            ws = await websockets.connect(clean_url, **kw)
+            return _tune_ws(ws)
         except Exception:
             pass
 
     kw[_HEADERS_KWARG] = {}
-    return await websockets.connect(WORKER_URL, **kw)
+    ws = await websockets.connect(direct_url, **kw)
+    return _tune_ws(ws)
+
+async def _warm_pool_once():
+    global _WARM_INFLIGHT
+    if not WORKER_HOST or not UUID:
+        return
+    try:
+        ws = await _ws_connect_fresh()
+        if len(_WS_POOL) < _POOL_SIZE:
+            _WS_POOL.append((time.monotonic(), ws))
+        else:
+            await ws.close()
+    except Exception:
+        pass
+    finally:
+        _WARM_INFLIGHT = max(0, _WARM_INFLIGHT - 1)
+
+def _schedule_pool_refill():
+    global _WARM_INFLIGHT
+    if not WORKER_HOST or not UUID:
+        return
+    now = time.monotonic()
+    while _WS_POOL and (now - _WS_POOL[0][0] > _POOL_TTL or getattr(_WS_POOL[0][1], "closed", False)):
+        _, stale = _WS_POOL.popleft()
+        asyncio.create_task(stale.close())
+    deficit = _POOL_SIZE - (len(_WS_POOL) + _WARM_INFLIGHT)
+    for _ in range(max(0, deficit)):
+        _WARM_INFLIGHT += 1
+        asyncio.create_task(_warm_pool_once())
+
+async def ws_connect():
+    now = time.monotonic()
+    while _WS_POOL:
+        created, ws = _WS_POOL.popleft()
+        if (now - created) <= _POOL_TTL and not getattr(ws, "closed", False):
+            _schedule_pool_refill()
+            return ws, True
+        asyncio.create_task(ws.close())
+    _schedule_pool_refill()
+    return await _ws_connect_fresh(), False
+
+async def _cl2_handshake(ws, host, port):
+    init, key = build_init(host, port)
+    await ws.send(init)
+    raw_expanded = key * ((MAX_CHUNK // 16) + 2)
+    mv_key = memoryview(raw_expanded)
+    ack = await asyncio.wait_for(ws.recv(), timeout=10)
+    if len(ack) < 16:
+        raise ConnectionError("Invalid Cl2 ACK length")
+    ack_l = len(ack)
+    ack_k = _int_from_bytes(mv_key[:ack_l], BO)
+    expect = hmac.new(key, b"OK", hashlib.sha256).digest()[:16]
+    if (_int_from_bytes(ack, BO) ^ ack_k).to_bytes(ack_l, BO) != expect:
+        raise ConnectionError("Cl2 HMAC ACK verification failed")
+    return key, mv_key
 
 async def handler(r, w):
+    ws = None
     try:
         try:
             h = await asyncio.wait_for(r.readexactly(2), timeout=5)
@@ -98,37 +252,28 @@ async def handler(r, w):
             port = struct.unpack("!H", await r.readexactly(2))[0]
         except Exception: return
 
-        sock = w.get_extra_info('socket')
-        if sock:
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                if hasattr(socket, 'TCP_QUICKACK'):
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, BUFFER_MAX)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, BUFFER_MAX)
+        _tune_socket(w.get_extra_info("socket"))
+        w.transport.set_write_buffer_limits(high=BUFFER_MAX, low=BUFFER_MAX >> 2)
+
+        try:
+            ws, from_pool = await ws_connect()
+        except Exception:
+            return
+
+        try:
+            key, mv_key = await _cl2_handshake(ws, host, port)
+        except Exception:
+            if not from_pool:
+                return
+            try: await ws.close()
             except Exception: pass
+            try:
+                ws = await _ws_connect_fresh()
+                key, mv_key = await _cl2_handshake(ws, host, port)
+            except Exception:
+                return
 
-        try:
-            ws = await ws_connect()
-        except Exception: return
-
-        init, key = build_init(host, port)
-        await ws.send(init)
-
-        raw_expanded = key * ((MAX_CHUNK // len(key)) + 1)
-        mv_key = memoryview(raw_expanded)
         key_cache = {}
-
-        try:
-            ack = await asyncio.wait_for(ws.recv(), timeout=10)
-            if len(ack) < 16: return
-        except Exception: return
-
-        ack_l = len(ack)
-        ack_k = _int_from_bytes(mv_key[:ack_l], BO)
-        expect = hmac.new(key, b"OK", hashlib.sha256).digest()[:16]
-        if (_int_from_bytes(ack, BO) ^ ack_k).to_bytes(ack_l, BO) != expect: return
-
         w.transport.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
 
         async def up():
@@ -137,17 +282,18 @@ async def handler(r, w):
             try:
                 while True:
                     d = await r_read(MAX_CHUNK)
-                    if not d: break
+                    if not d:
+                        break
                     l = len(d)
                     k = key_cache.get(l)
                     if k is None:
                         k = _int_from_bytes(mv_key[:l], BO)
-                        if len(key_cache) < 2048: key_cache[l] = k
+                        if len(key_cache) < 4096:
+                            key_cache[l] = k
                     await ws_send((_int_from_bytes(d, BO) ^ k).to_bytes(l, BO))
-            except Exception: pass
-            finally:
+            except Exception:
                 try: await ws.close()
-                except: pass
+                except Exception: pass
 
         async def down():
             transport = w.transport
@@ -161,25 +307,50 @@ async def handler(r, w):
                         k = key_cache.get(l)
                         if k is None:
                             k = _int_from_bytes(mv_key[:l], BO)
-                            if len(key_cache) < 2048: key_cache[l] = k
+                            if len(key_cache) < 4096:
+                                key_cache[l] = k
                         t_write((_int_from_bytes(m, BO) ^ k).to_bytes(l, BO))
-                        if get_buf() > BUFFER_MAX:
+                        if get_buf() > (BUFFER_MAX >> 1):
                             await w_drain()
-            except Exception: pass
+            except Exception:
+                pass
             finally:
                 try: w.close()
-                except: pass
+                except Exception: pass
 
-        await asyncio.gather(up(), down())
-    except Exception: pass
+        up_task = asyncio.create_task(up())
+        down_task = asyncio.create_task(down())
+        done, pending = await asyncio.wait(
+            (up_task, down_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if down_task in done:
+            up_task.cancel()
+            await asyncio.gather(up_task, return_exceptions=True)
+        else:
+            await asyncio.gather(*pending, return_exceptions=True)
+    except Exception:
+        pass
     finally:
+        if ws is not None:
+            try: await ws.close()
+            except Exception: pass
         try: w.close()
-        except: pass
+        except Exception: pass
 
 async def main():
-    print(f"[*] AMIR Mode Proxy {LISTEN[0]}:{LISTEN[1]} -> {WORKER_HOST}")
-    srv = await asyncio.start_server(handler, LISTEN[0], LISTEN[1])
-    async with srv: await srv.serve_forever()
+    print(f"[*] AMIR Mode Proxy {LISTEN[0]}:{LISTEN[1]} -> {WORKER_HOST} (Turbo Pool x{_POOL_SIZE})")
+    _schedule_pool_refill()
+    srv = await asyncio.start_server(
+        handler,
+        LISTEN[0],
+        LISTEN[1],
+        backlog=512,
+        limit=BUFFER_MAX,
+        reuse_address=True,
+    )
+    async with srv:
+        await srv.serve_forever()
 
 if __name__ == "__main__":
     try: asyncio.run(main())

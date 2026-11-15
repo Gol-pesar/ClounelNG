@@ -66,6 +66,11 @@ class Cl2ProtocolUnitTest {
         val ackPlain = Cl2Crypto.expectedAck(key)
         val ackEncrypted = Cl2Crypto.xorTransform(ackPlain, ackPlain.size, key)
         assertTrue(Cl2Crypto.verifyAck(ackEncrypted, key))
+
+        // Zero-copy FrameBuffer style oversized array check
+        val oversized = ByteArray(1024)
+        System.arraycopy(ackEncrypted, 0, oversized, 0, ackEncrypted.size)
+        assertTrue(Cl2Crypto.verifyAck(oversized, ackEncrypted.size, key))
     }
 
     @Test
@@ -153,5 +158,8 @@ class Cl2ProtocolUnitTest {
         assertEquals("172.67.70.10", reparsed.cleanIp)
         assertEquals("127.0.0.1", reparsed.listenHost)
         assertEquals(40446, reparsed.listenPort)
+        assertTrue(updated.contains("_WS_POOL"))
+        assertTrue(updated.contains("_get_ssl_ctx"))
+        assertTrue(updated.contains("_parse_clean_ip"))
     }
 }

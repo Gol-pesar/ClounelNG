@@ -62,8 +62,12 @@ object Cl2Crypto {
     }
 
     fun verifyAck(ackPacket: ByteArray, key: ByteArray): Boolean {
-        if (ackPacket.size < 16) return false
-        val decrypted = xorTransform(ackPacket, ackPacket.size, key)
+        return verifyAck(ackPacket, ackPacket.size, key)
+    }
+
+    fun verifyAck(ackPacket: ByteArray, length: Int, key: ByteArray): Boolean {
+        if (length < 16 || ackPacket.size < length) return false
+        val decrypted = xorTransform(ackPacket, length, key)
         val expected = expectedAck(key)
         return decrypted.contentEquals(expected)
     }

@@ -196,19 +196,19 @@ jobs:
           RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
 
           NOTES_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/release-notes.XXXXXX.md")"
-          cat <<EOF > "${NOTES_FILE}"
-          This is an automatically generated debug APK.
-
-          - Built by: GitHub Actions
-          - GitHub Actions Run Number: ${GITHUB_RUN_NUMBER}
-          - GitHub Actions Run Attempt: ${GITHUB_RUN_ATTEMPT}
-          - Source Commit SHA: ${GITHUB_SHA}
-
-          Notice:
-          - This APK is intended for testing.
-          - This APK is not a Play Store production release.
-          - This APK is signed only with a temporary debug keystore.
-          EOF
+          printf '%s\n' \
+            "This is an automatically generated debug APK." \
+            "" \
+            "- Built by: GitHub Actions" \
+            "- GitHub Actions Run Number: ${GITHUB_RUN_NUMBER}" \
+            "- GitHub Actions Run Attempt: ${GITHUB_RUN_ATTEMPT}" \
+            "- Source Commit SHA: ${GITHUB_SHA}" \
+            "" \
+            "Notice:" \
+            "- This APK is intended for testing." \
+            "- This APK is not a Play Store production release." \
+            "- This APK is signed only with a temporary debug keystore." \
+            > "${NOTES_FILE}"
 
           gh release create "${RELEASE_TAG}" \
             "${ASSET_PATH}" \
@@ -219,7 +219,7 @@ jobs:
 
       - name: Report APK download result
         id: report_release
-        if: ${{ steps.publish_release.outcome == 'success' || steps.publish_release.outcome == 'failure' }}
+        if: ${{ always() && (steps.publish_release.outcome == 'success' || steps.publish_release.outcome == 'failure') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

@@ -88,6 +88,7 @@ object ProxyProbeRunner {
                 bufferMax = profile.bufferMax,
                 tcpNoDelay = settings.tcpNoDelay,
                 autoFallbackCleanIp = settings.autoFallbackCleanIp,
+                useStandbyPool = false,
                 onLog = {}
             )
             try {

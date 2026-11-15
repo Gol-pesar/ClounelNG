@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Cloud Silhouette (transparent background) -->
+    <path
+        android:fillColor="#EA8C1E"
+        android:pathData="M35,71 L73,71 C79.8,71 85,65.6 85,58.8 C85,52.5 80.5,47.4 74.5,46.6 C72.7,37.9 65.1,31.5 56,31.5 C48.2,31.5 41.6,36.2 38.9,43.0 C37.9,42.7 36.8,42.5 35.7,42.5 C28.1,42.5 22,48.6 22,56.2 C22,64.4 27.8,71 35,71 Z" />
+
+    <!-- Military Rank Chevrons Cutout -->
+    <path
+        android:fillColor="#111216"
+        android:pathData="M45,51.5 L54,44.2 L63,51.5 L63,54.6 L54,47.3 L45,54.6 Z" />
+    <path
+        android:fillColor="#111216"
+        android:pathData="M45,58.0 L54,50.7 L63,58.0 L63,61.1 L54,53.8 L45,61.1 Z" />
+    <path
+        android:fillColor="#111216"
+        android:pathData="M45,64.5 L54,57.2 L63,64.5 L63,67.6 L54,60.3 L45,67.6 Z" />
+</vector>

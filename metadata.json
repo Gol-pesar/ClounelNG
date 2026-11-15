@@ -1,0 +1,6 @@
+{
+  "name": "Clounel",
+  "description": "Minimalist high-speed VPN and encrypted tunnel client with Clean IP routing, QR/Clipboard config management, and AMIR Mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

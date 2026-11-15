@@ -57,6 +57,7 @@ import com.example.model.EngineStatus
 import com.example.model.TunnelMode
 import com.example.ui.MainUiState
 import com.example.ui.UiStrings
+import com.example.ui.components.CautionNoteBanner
 import com.example.ui.components.EndpointChip
 import com.example.ui.components.PulseConnectButton
 import com.example.ui.components.formatBytes
@@ -75,6 +76,7 @@ fun DashboardScreen(
     onCopyText: (String) -> Unit,
     onRunProbe: () -> Unit,
     onTestHandshake: () -> Unit,
+    onOpenConfigs: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val pulseColors = LocalPulseColors.current
@@ -106,6 +108,10 @@ fun DashboardScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            item {
+                CautionNoteBanner(text = strings.cautionNote)
+            }
+
             if (!isIgnoringBatteryOpt) {
                 item {
                     Card(
@@ -317,6 +323,21 @@ fun DashboardScreen(
                                         modifier = Modifier.weight(1f)
                                     )
                                 }
+                            }
+                        } else {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = strings.noConfigTitle,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = onOpenConfigs,
+                                border = BorderStroke(1.dp, pulseColors.cardBorder),
+                                modifier = Modifier.testTag("dashboard_add_config_button")
+                            ) {
+                                Text(strings.addOrImportConfig)
                             }
                         }
                     }

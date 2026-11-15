@@ -22,11 +22,11 @@ data class ProxyProfile(
     val id: Long = 0L,
     val name: String,
     val mode: TunnelMode = TunnelMode.CL2_WSS,
-    // Cl2 WSS Worker settings (matching Cl2_82497904.py)
-    val uuid: String = "63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd",
-    val workerHost: String = "twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev",
-    val workerUrl: String = "wss://twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev/",
-    val cleanIp: String = "172.67.70.244",
+    // Cl2 WSS Worker settings
+    val uuid: String = "",
+    val workerHost: String = "",
+    val workerUrl: String = "",
+    val cleanIp: String = "",
     val subprotocol: String = "chat.v2",
     val listenHost: String = "127.0.0.1",
     val listenPort: Int = 40446,

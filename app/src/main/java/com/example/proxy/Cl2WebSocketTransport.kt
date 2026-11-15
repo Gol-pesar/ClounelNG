@@ -62,14 +62,16 @@ class Cl2WebSocketTransport private constructor(
             autoFallbackCleanIp: Boolean,
             onLog: (String) -> Unit
         ): Cl2WebSocketTransport {
-            val normalizedUrl = normalizeWsUrl(workerUrl, workerHost)
+            val effectiveHost = workerHost.trim().ifBlank { ConfigShareCodec.extractHostFromWorkerUrl(workerUrl) }
+            require(effectiveHost.isNotBlank()) { "Worker Host/URL is empty" }
+            val normalizedUrl = normalizeWsUrl(workerUrl, effectiveHost)
             val trimmedCleanIp = cleanIp.trim().removePrefix("[").removeSuffix("]")
 
             if (trimmedCleanIp.isNotEmpty()) {
                 try {
                     return connectInternal(
                         url = normalizedUrl,
-                        workerHost = workerHost,
+                        workerHost = effectiveHost,
                         overrideIp = trimmedCleanIp,
                         subprotocol = subprotocol,
                         bufferMax = bufferMax,
@@ -77,13 +79,13 @@ class Cl2WebSocketTransport private constructor(
                     )
                 } catch (e: Exception) {
                     if (!autoFallbackCleanIp) throw e
-                    onLog("Clean IP ($trimmedCleanIp) failed (${e.message}), falling back to $workerHost")
+                    onLog("Clean IP ($trimmedCleanIp) failed (${e.message}), falling back to $effectiveHost")
                 }
             }
 
             return connectInternal(
                 url = normalizedUrl,
-                workerHost = workerHost,
+                workerHost = effectiveHost,
                 overrideIp = null,
                 subprotocol = subprotocol,
                 bufferMax = bufferMax,
@@ -153,7 +155,7 @@ class Cl2WebSocketTransport private constructor(
             }
 
             val connected = CompletableDeferred<WebSocket>()
-            val incoming = Channel<ByteArray>(capacity = 512)
+            val incoming = Channel<ByteArray>(capacity = 2048)
 
             val ws = client.newWebSocket(
                 requestBuilder.build(),
@@ -181,9 +183,11 @@ class Cl2WebSocketTransport private constructor(
 
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                         if (!connected.isCompleted) {
-                            connected.completeExceptionally(
-                                IOException(t.message ?: "WebSocket failure", t)
-                            )
+                            val detail = buildString {
+                                if (response != null) append("HTTP ${response.code}: ")
+                                append(t.message ?: "WebSocket failure")
+                            }
+                            connected.completeExceptionally(IOException(detail, t))
                         }
                         incoming.close(t)
                     }

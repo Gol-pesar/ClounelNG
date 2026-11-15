@@ -69,6 +69,7 @@ import com.example.model.TunnelMode
 import com.example.proxy.ConfigShareCodec
 import com.example.ui.MainUiState
 import com.example.ui.UiStrings
+import com.example.ui.components.CautionNoteBanner
 import com.example.ui.components.QrExportDialog
 import com.example.ui.components.QrImportDialog
 import com.example.ui.theme.LocalPulseColors
@@ -164,6 +165,37 @@ fun ProfilesScreen(
                             Text(strings.importQrTitle.let { if (it.contains("اسکن")) "ورود QR Code" else "Scan QR" }, maxLines = 1)
                         }
                     }
+
+                    CautionNoteBanner(text = strings.cautionNote)
+                }
+            }
+
+            if (state.profiles.isEmpty()) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.2.dp, pulseColors.cardBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("empty_configs_card")
+                    ) {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(18.dp)
+                        ) {
+                            Text(
+                                text = strings.noConfigTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = strings.noConfigDesc,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 
@@ -253,14 +285,12 @@ fun ProfilesScreen(
                                         contentDescription = strings.editProfile
                                     )
                                 }
-                                if (state.profiles.size > 1) {
-                                    IconButton(onClick = { onDeleteProfile(profile) }) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.DeleteOutline,
-                                            contentDescription = strings.deleteProfile,
-                                            tint = MaterialTheme.colorScheme.error
-                                        )
-                                    }
+                                IconButton(onClick = { onDeleteProfile(profile) }) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteOutline,
+                                        contentDescription = strings.deleteProfile,
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
                                 }
                             }
                         }
@@ -398,6 +428,7 @@ private fun ProfileEditorDialog(
     var upstreamPort by remember { mutableStateOf(initial.upstreamPort.toString()) }
     var upstreamUser by remember { mutableStateOf(initial.upstreamUsername) }
     var upstreamPass by remember { mutableStateOf(initial.upstreamPassword) }
+    var showValidationError by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -448,15 +479,23 @@ private fun ProfileEditorDialog(
                         )
                         OutlinedTextField(
                             value = uuid,
-                            onValueChange = { uuid = it },
+                            onValueChange = {
+                                uuid = it
+                                showValidationError = false
+                            },
                             label = { Text("UUID") },
+                            isError = showValidationError && uuid.isBlank(),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
                         OutlinedTextField(
                             value = workerUrl,
-                            onValueChange = { workerUrl = it },
+                            onValueChange = {
+                                workerUrl = it
+                                showValidationError = false
+                            },
                             label = { Text("Worker URL") },
+                            isError = showValidationError && ConfigShareCodec.extractHostFromWorkerUrl(workerUrl).isBlank(),
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -464,8 +503,12 @@ private fun ProfileEditorDialog(
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedTextField(
                                 value = upstreamHost,
-                                onValueChange = { upstreamHost = it },
+                                onValueChange = {
+                                    upstreamHost = it
+                                    showValidationError = false
+                                },
                                 label = { Text(strings.upstreamHost) },
+                                isError = showValidationError && upstreamHost.isBlank(),
                                 singleLine = true,
                                 modifier = Modifier.weight(1.5f)
                             )
@@ -560,35 +603,46 @@ private fun ProfileEditorDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val trimmedUrl = workerUrl.trim().let {
-                        when {
-                            it.isEmpty() -> ""
-                            "://" in it -> it
-                            else -> "wss://$it/"
-                        }
+                    val normalizedUrl = ConfigShareCodec.normalizeWorkerUrl(workerUrl)
+                    val derivedHost = ConfigShareCodec.extractHostFromWorkerUrl(normalizedUrl)
+                        .ifBlank { initial.workerHost }
+                    val finalUrl = normalizedUrl.ifBlank {
+                        if (derivedHost.isNotBlank()) "wss://$derivedHost/" else ""
                     }
-                    val derivedHost = ConfigShareCodec.extractHostFromWorkerUrl(trimmedUrl)
+                    val trimmedUuid = uuid.trim()
+                    val trimmedUpstream = upstreamHost.trim()
+                    val isValid = if (mode == TunnelMode.CL2_WSS) {
+                        trimmedUuid.isNotBlank() && derivedHost.isNotBlank() && finalUrl.isNotBlank()
+                    } else {
+                        trimmedUpstream.isNotBlank()
+                    }
+                    if (!isValid) {
+                        showValidationError = true
+                        return@Button
+                    }
+
                     val portInt = (listenPort.toIntOrNull() ?: 40446).coerceIn(1024, 65535)
                     val upPortInt = (upstreamPort.toIntOrNull() ?: 1080).coerceIn(1, 65535)
                     val chunkInt = (maxChunk.toIntOrNull() ?: 65536).coerceIn(4096, 1048576)
                     val bufInt = (bufferMax.toIntOrNull() ?: 4194304).coerceIn(65536, 16777216)
                     onConfirm(
                         initial.copy(
-                            name = name.trim().ifEmpty { "AMIR Config" },
+                            name = name.trim().ifEmpty { derivedHost.ifBlank { "AMIR Config" } },
                             mode = mode,
-                            uuid = uuid.trim(),
-                            workerHost = derivedHost.ifBlank { initial.workerHost },
-                            workerUrl = trimmedUrl.ifBlank { "wss://${initial.workerHost}/" },
+                            uuid = trimmedUuid,
+                            workerHost = derivedHost,
+                            workerUrl = finalUrl,
                             cleanIp = cleanIp.trim(),
                             subprotocol = subprotocol.trim().ifEmpty { "chat.v2" },
                             listenHost = listenHost.trim().ifEmpty { "127.0.0.1" },
                             listenPort = portInt,
                             maxChunk = chunkInt,
                             bufferMax = bufInt,
-                            upstreamHost = upstreamHost.trim(),
+                            upstreamHost = trimmedUpstream,
                             upstreamPort = upPortInt,
                             upstreamUsername = upstreamUser,
-                            upstreamPassword = upstreamPass
+                            upstreamPassword = upstreamPass,
+                            isDefault = false
                         )
                     )
                 }

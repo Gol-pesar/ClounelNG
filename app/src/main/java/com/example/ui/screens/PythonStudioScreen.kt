@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Terminal
@@ -62,12 +63,14 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.proxy.PythonScriptBridge
 import com.example.ui.MainUiState
 import com.example.ui.UiStrings
+import com.example.ui.components.CautionNoteBanner
 import com.example.ui.theme.LocalPulseColors
 import com.example.ui.theme.MonoFontFamily
 
@@ -76,6 +79,9 @@ import com.example.ui.theme.MonoFontFamily
 fun PythonStudioScreen(
     state: MainUiState,
     strings: UiStrings,
+    isUnlocked: Boolean,
+    onUnlockAttempt: (String) -> Boolean,
+    onLockPython: () -> Unit,
     onScriptChange: (String) -> Unit,
     onSyncFromProfile: () -> Unit,
     onApplyAndRun: (Boolean) -> Unit,
@@ -87,6 +93,87 @@ fun PythonStudioScreen(
     val context = LocalContext.current
     val pulseColors = LocalPulseColors.current
     var testUrl by remember { mutableStateOf("https://api.ipify.org?format=json") }
+    var passwordInput by remember { mutableStateOf("") }
+    var passwordError by remember { mutableStateOf(false) }
+
+    if (!isUnlocked) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.2.dp, pulseColors.cardBorder),
+                modifier = Modifier.widthIn(max = 460.dp).fillMaxWidth()
+            ) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.padding(20.dp)
+                ) {
+                    CautionNoteBanner(text = strings.cautionNote)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.Lock,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = strings.pythonPasswordTitle,
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
+                    Text(
+                        text = strings.pythonPasswordDesc,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                        OutlinedTextField(
+                            value = passwordInput,
+                            onValueChange = {
+                                passwordInput = it
+                                passwordError = false
+                            },
+                            label = { Text(strings.pythonPasswordLabel) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            isError = passwordError,
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("python_lock_screen_input")
+                        )
+                    }
+                    if (passwordError) {
+                        Text(
+                            text = strings.pythonPasswordWrong,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            if (onUnlockAttempt(passwordInput)) {
+                                passwordInput = ""
+                                passwordError = false
+                            } else {
+                                passwordError = true
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("python_lock_screen_unlock_button")
+                    ) {
+                        Text(strings.pythonPasswordUnlock)
+                    }
+                }
+            }
+        }
+        return
+    }
 
     val parsedPreview = remember(state.pythonScript) {
         PythonScriptBridge.parseScript(state.pythonScript)
@@ -126,10 +213,15 @@ fun PythonStudioScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 720.dp),
+                .widthIn(max = 720.dp)
+                .testTag("python_studio_list"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            item {
+                CautionNoteBanner(text = strings.cautionNote)
+            }
+
             // Header Card
             item {
                 Card(
@@ -181,17 +273,17 @@ fun PythonStudioScreen(
                                     modifier = Modifier.padding(12.dp)
                                 ) {
                                     Text(
-                                        text = "LISTEN: ${parsedPreview.listenHost ?: "?"}:${parsedPreview.listenPort ?: "?"}   •   SUBPROTO: ${parsedPreview.subprotocol ?: "?"}",
+                                        text = "LISTEN: ${parsedPreview.listenHost?.ifBlank { null } ?: "?"}:${parsedPreview.listenPort ?: "?"}   •   SUBPROTO: ${parsedPreview.subprotocol?.ifBlank { null } ?: "?"}",
                                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFontFamily),
                                         color = pulseColors.cyanAccent
                                     )
                                     Text(
-                                        text = "WORKER_HOST: ${parsedPreview.workerHost ?: "?"}",
+                                        text = "WORKER_HOST: ${parsedPreview.workerHost?.ifBlank { null } ?: "-"}",
                                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFontFamily),
                                         color = Color(0xFFE2E8F0)
                                     )
                                     Text(
-                                        text = "CLEAN_IP: ${parsedPreview.cleanIp ?: "DNS"}   •   CHUNK: ${parsedPreview.maxChunk ?: 65536}   •   BUF: ${parsedPreview.bufferMax ?: 4194304}",
+                                        text = "CLEAN_IP: ${parsedPreview.cleanIp?.ifBlank { null } ?: "DNS"}   •   CHUNK: ${parsedPreview.maxChunk ?: 65536}   •   BUF: ${parsedPreview.bufferMax ?: 4194304}",
                                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = MonoFontFamily),
                                         color = pulseColors.success
                                     )
@@ -260,6 +352,11 @@ fun PythonStudioScreen(
                                 Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text(strings.copy)
+                            }
+                            OutlinedButton(onClick = onLockPython) {
+                                Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(strings.pythonLockAction)
                             }
                         }
                     }

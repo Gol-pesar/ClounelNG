@@ -98,7 +98,18 @@ data class UiStrings(
     val settingTcpNoDelay: String,
     val settingTcpNoDelayDesc: String,
     val noLogsYet: String,
-    val startEngineFirstHint: String
+    val startEngineFirstHint: String,
+    val cautionNote: String,
+    val noConfigTitle: String,
+    val noConfigDesc: String,
+    val addOrImportConfig: String,
+    val noConfigConnectError: String,
+    val pythonPasswordTitle: String,
+    val pythonPasswordDesc: String,
+    val pythonPasswordLabel: String,
+    val pythonPasswordUnlock: String,
+    val pythonPasswordWrong: String,
+    val pythonLockAction: String
 )
 
 object StringsL10n {
@@ -198,7 +209,18 @@ object StringsL10n {
         settingTcpNoDelay = "بهینه‌سازی TCP_NODELAY",
         settingTcpNoDelayDesc = "حذف تاخیر Nagle و فعال‌سازی بافر پرظرفیت",
         noLogsYet = "هنوز لاگی ثبت نشده است. تانل را روشن کنید.",
-        startEngineFirstHint = "ابتدا اتصال AMIR Mode را روشن کنید"
+        startEngineFirstHint = "ابتدا اتصال AMIR Mode را روشن کنید",
+        cautionNote = "یادداشت: اگر دانش کافی ندارید چیزی را تغییر ندهید!",
+        noConfigTitle = "هیچ کانفیگی وجود ندارد",
+        noConfigDesc = "برای اتصال، یک کانفیگ بسازید یا از طریق کلیپ‌بورد و QR Code وارد کنید.",
+        addOrImportConfig = "افزودن یا ایمپورت کانفیگ",
+        noConfigConnectError = "ابتدا یک کانفیگ اضافه یا ایمپورت کنید",
+        pythonPasswordTitle = "قفل ویرایشگر پایتون",
+        pythonPasswordDesc = "برای مشاهده و ویرایش کد پایتون، رمز عبور را وارد کنید.",
+        pythonPasswordLabel = "رمز عبور",
+        pythonPasswordUnlock = "باز کردن قفل",
+        pythonPasswordWrong = "رمز عبور اشتباه است",
+        pythonLockAction = "قفل کردن ویرایشگر"
     )
 
     val en = UiStrings(
@@ -297,7 +319,18 @@ object StringsL10n {
         settingTcpNoDelay = "TCP_NODELAY Optimization",
         settingTcpNoDelayDesc = "Disable Nagle buffering and maximize socket buffers",
         noLogsYet = "No logs recorded yet. Start the tunnel to inspect traffic.",
-        startEngineFirstHint = "Start AMIR Mode tunnel first"
+        startEngineFirstHint = "Start AMIR Mode tunnel first",
+        cautionNote = "Note: If you do not have sufficient knowledge, do not change anything!",
+        noConfigTitle = "No Config Added Yet",
+        noConfigDesc = "Create a new config or import one via Clipboard or QR Code to connect.",
+        addOrImportConfig = "Add or Import Config",
+        noConfigConnectError = "Please add or import a config first",
+        pythonPasswordTitle = "Python Editor Locked",
+        pythonPasswordDesc = "Enter the password to access and edit the Python Cl2 script.",
+        pythonPasswordLabel = "Password",
+        pythonPasswordUnlock = "Unlock",
+        pythonPasswordWrong = "Incorrect password",
+        pythonLockAction = "Lock Python Editor"
     )
 
     fun forLang(lang: AppLanguage): UiStrings = if (lang == AppLanguage.FA) fa else en

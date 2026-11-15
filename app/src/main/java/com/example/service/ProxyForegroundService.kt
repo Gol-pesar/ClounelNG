@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.PulseProxyApplication
@@ -42,7 +43,7 @@ class ProxyForegroundService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 ProxyEngineController.stopEngine()
-                stopForeground(STOP_FOREGROUND_REMOVE)
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -67,7 +68,7 @@ class ProxyForegroundService : Service() {
 
                     if (profile == null) {
                         ProxyEngineController.stopEngine()
-                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        ServiceCompat.stopForeground(this@ProxyForegroundService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         stopSelf()
                         return@launch
                     }
@@ -87,7 +88,7 @@ class ProxyForegroundService : Service() {
             ProxyEngineController.telemetry.collect { t ->
                 if (t.status == EngineStatus.STOPPED || t.status == EngineStatus.ERROR) {
                     if (t.status == EngineStatus.STOPPED) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        ServiceCompat.stopForeground(this@ProxyForegroundService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     }
                     return@collect
@@ -127,7 +128,7 @@ class ProxyForegroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher_round)
+            .setSmallIcon(R.drawable.ic_clounel_notif)
             .setContentTitle(getString(R.string.notif_title_running))
             .setContentText(contentText)
             .setOngoing(true)

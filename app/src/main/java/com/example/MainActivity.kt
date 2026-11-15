@@ -37,6 +37,8 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.LightMode
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,6 +47,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -66,6 +69,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -130,6 +134,10 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
     var isIgnoringBatteryOpt by remember {
         mutableStateOf(checkBatteryOptimizationIgnored(context))
     }
+    var isPythonUnlocked by remember { mutableStateOf(false) }
+    var showPythonPasswordDialog by remember { mutableStateOf(false) }
+    var pythonPasswordInput by remember { mutableStateOf("") }
+    var pythonPasswordError by remember { mutableStateOf(false) }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         isIgnoringBatteryOpt = checkBatteryOptimizationIgnored(context)
@@ -247,6 +255,16 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
             }
             launchSingleTop = true
             restoreState = true
+        }
+    }
+
+    val onConnectWithConfigCheck: () -> Unit = {
+        val status = state.telemetry.status
+        if (status != EngineStatus.RUNNING && status != EngineStatus.STARTING && state.activeProfile == null) {
+            showToastMessage(strings.noConfigConnectError)
+            navigateTo(ROUTE_PROFILES)
+        } else {
+            onToggleWithPermissionCheck()
         }
     }
 
@@ -376,7 +394,7 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
                                     strings = strings,
                                     isIgnoringBatteryOpt = isIgnoringBatteryOpt,
                                     onRequestDisableBatteryOpt = requestDisableBatteryOptimization,
-                                    onToggleEngine = onToggleWithPermissionCheck,
+                                    onToggleEngine = onConnectWithConfigCheck,
                                     onVpnModeChange = { enabled ->
                                         viewModel.setVpnModeEnabled(context, enabled)
                                     },
@@ -384,7 +402,8 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
                                     onRunProbe = { viewModel.runSocks5Probe("https://api.ipify.org?format=json") },
                                     onTestHandshake = {
                                         state.activeProfile?.let { viewModel.testCl2Handshake(it) }
-                                    }
+                                    },
+                                    onOpenConfigs = { navigateTo(ROUTE_PROFILES) }
                                 )
                             }
                             composable(ROUTE_PROFILES) {
@@ -393,7 +412,7 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
                                     strings = strings,
                                     onSelectProfile = { viewModel.selectProfile(context, it) },
                                     onSaveProfile = { viewModel.saveProfile(context, it, true) },
-                                    onDeleteProfile = { viewModel.deleteProfile(it) },
+                                    onDeleteProfile = { viewModel.deleteProfile(context, it) },
                                     onTestHandshake = { viewModel.testCl2Handshake(it) },
                                     onImportFromClipboard = {
                                         val clipText = readClipboardText()
@@ -422,27 +441,38 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
                                     onShowMessage = showToastMessage
                                 )
                             }
-                            // Preserved (hidden from bottom nav, reachable from Advanced Settings)
+                            // Preserved (hidden from bottom nav, password-protected, reachable from Advanced Settings)
                             composable(ROUTE_PYTHON) {
                                 PythonStudioScreen(
                                     state = state,
                                     strings = strings,
+                                    isUnlocked = isPythonUnlocked,
+                                    onUnlockAttempt = { pwd ->
+                                        val ok = pwd.trim() == "amirali"
+                                        if (ok) isPythonUnlocked = true
+                                        ok
+                                    },
+                                    onLockPython = {
+                                        isPythonUnlocked = false
+                                        navController.popBackStack()
+                                    },
                                     onScriptChange = { viewModel.updatePythonScriptDraft(it) },
                                     onSyncFromProfile = { viewModel.syncScriptFromActiveProfile() },
                                     onApplyAndRun = { startNow ->
                                         if (!startNow) {
                                             viewModel.applyPythonScript(context, false)
                                         } else {
-                                            viewModel.applyPythonScript(context, false)
-                                            if (state.settings.vpnModeEnabled) {
-                                                val prepIntent = VpnService.prepare(context)
-                                                if (prepIntent != null) {
-                                                    vpnPermissionLauncher.launch(prepIntent)
+                                            viewModel.applyPythonScript(context, false) {
+                                                if (state.settings.vpnModeEnabled) {
+                                                    val prepIntent = VpnService.prepare(context)
+                                                    if (prepIntent != null) {
+                                                        vpnPermissionLauncher.launch(prepIntent)
+                                                    } else {
+                                                        viewModel.startSelectedEngine(context)
+                                                    }
                                                 } else {
                                                     viewModel.startSelectedEngine(context)
                                                 }
-                                            } else {
-                                                viewModel.startSelectedEngine(context)
                                             }
                                         }
                                     },
@@ -458,8 +488,14 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
                                     isIgnoringBatteryOpt = isIgnoringBatteryOpt,
                                     onRequestDisableBatteryOpt = requestDisableBatteryOptimization,
                                     onOpenHiddenPythonStudio = {
-                                        navController.navigate(ROUTE_PYTHON) {
-                                            launchSingleTop = true
+                                        if (isPythonUnlocked) {
+                                            navController.navigate(ROUTE_PYTHON) {
+                                                launchSingleTop = true
+                                            }
+                                        } else {
+                                            pythonPasswordInput = ""
+                                            pythonPasswordError = false
+                                            showPythonPasswordDialog = true
                                         }
                                     },
                                     onLanguageChange = { viewModel.setLanguage(it) },
@@ -475,6 +511,70 @@ fun PulseProxyAppRoot(viewModel: MainViewModel = viewModel()) {
                             }
                         }
                     }
+                }
+
+                if (showPythonPasswordDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showPythonPasswordDialog = false },
+                        title = { Text(strings.pythonPasswordTitle) },
+                        text = {
+                            androidx.compose.foundation.layout.Column {
+                                Text(
+                                    text = strings.pythonPasswordDesc,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.size(10.dp))
+                                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                    OutlinedTextField(
+                                        value = pythonPasswordInput,
+                                        onValueChange = {
+                                            pythonPasswordInput = it
+                                            pythonPasswordError = false
+                                        },
+                                        label = { Text(strings.pythonPasswordLabel) },
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        isError = pythonPasswordError,
+                                        singleLine = true,
+                                        modifier = Modifier.testTag("python_password_input")
+                                    )
+                                }
+                                if (pythonPasswordError) {
+                                    Spacer(Modifier.size(6.dp))
+                                    Text(
+                                        text = strings.pythonPasswordWrong,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    if (pythonPasswordInput.trim() == "amirali") {
+                                        isPythonUnlocked = true
+                                        showPythonPasswordDialog = false
+                                        pythonPasswordInput = ""
+                                        pythonPasswordError = false
+                                        navController.navigate(ROUTE_PYTHON) {
+                                            launchSingleTop = true
+                                        }
+                                    } else {
+                                        pythonPasswordError = true
+                                    }
+                                },
+                                modifier = Modifier.testTag("python_password_confirm")
+                            ) {
+                                Text(strings.pythonPasswordUnlock)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showPythonPasswordDialog = false }) {
+                                Text(strings.cancel)
+                            }
+                        }
+                    )
                 }
             }
         }

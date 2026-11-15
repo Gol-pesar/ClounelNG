@@ -69,12 +69,30 @@ class Cl2ProtocolUnitTest {
     }
 
     @Test
-    fun `parseScript extracts all constants from Cl2_82497904`() {
-        val parsed = PythonScriptBridge.parseScript(PythonScriptBridge.DEFAULT_CL2_SCRIPT)
-        assertEquals("63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd", parsed.uuid)
-        assertEquals("twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev", parsed.workerHost)
-        assertEquals("wss://twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev/", parsed.workerUrl)
-        assertEquals("172.67.70.244", parsed.cleanIp)
+    fun `default template has no pre-seeded config and parseScript extracts constants`() {
+        val defaultParsed = PythonScriptBridge.parseScript(PythonScriptBridge.DEFAULT_CL2_SCRIPT)
+        assertEquals("", defaultParsed.uuid)
+        assertEquals("", defaultParsed.workerHost)
+        assertEquals("", defaultParsed.cleanIp)
+        assertEquals("127.0.0.1", defaultParsed.listenHost)
+        assertEquals(40446, defaultParsed.listenPort)
+        assertEquals("chat.v2", defaultParsed.subprotocol)
+
+        val sampleScript = """
+            UUID        = "11111111-2222-3333-4444-555555555555"
+            WORKER_HOST = "example-worker.workers.dev"
+            WORKER_URL  = f"wss://{WORKER_HOST}/"
+            CLEAN_IP    = "104.16.1.1"
+            LISTEN      = ("127.0.0.1", 40446)
+            SUBPROTO    = "chat.v2"
+            MAX_CHUNK   = 65536
+            BUFFER_MAX  = 4194304
+        """.trimIndent()
+        val parsed = PythonScriptBridge.parseScript(sampleScript)
+        assertEquals("11111111-2222-3333-4444-555555555555", parsed.uuid)
+        assertEquals("example-worker.workers.dev", parsed.workerHost)
+        assertEquals("wss://example-worker.workers.dev/", parsed.workerUrl)
+        assertEquals("104.16.1.1", parsed.cleanIp)
         assertEquals("127.0.0.1", parsed.listenHost)
         assertEquals(40446, parsed.listenPort)
         assertEquals("chat.v2", parsed.subprotocol)
@@ -87,10 +105,10 @@ class Cl2ProtocolUnitTest {
         val profile = ProxyProfile(
             name = "AMIR Fast",
             mode = TunnelMode.CL2_WSS,
-            uuid = "63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd",
-            workerHost = "twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev",
-            workerUrl = "wss://twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev/",
-            cleanIp = "172.67.70.244"
+            uuid = "11111111-2222-3333-4444-555555555555",
+            workerHost = "example-worker.workers.dev",
+            workerUrl = "wss://example-worker.workers.dev/",
+            cleanIp = "104.16.1.1"
         )
         val uri = ConfigShareCodec.encodeToUri(profile)
         assertTrue(uri.startsWith("amir://cl2?"))
@@ -101,8 +119,39 @@ class Cl2ProtocolUnitTest {
         assertEquals(profile.workerHost, decoded.workerHost)
         assertEquals(profile.cleanIp, decoded.cleanIp)
 
-        val decodedPy = ConfigShareCodec.decodeFromText(PythonScriptBridge.DEFAULT_CL2_SCRIPT).getOrThrow()
-        assertEquals("172.67.70.244", decodedPy.cleanIp)
-        assertEquals("63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd", decodedPy.uuid)
+        val samplePy = """
+            UUID        = "11111111-2222-3333-4444-555555555555"
+            WORKER_HOST = "example-worker.workers.dev"
+            CLEAN_IP    = "104.16.1.1"
+        """.trimIndent()
+        val decodedPy = ConfigShareCodec.decodeFromText(samplePy).getOrThrow()
+        assertEquals("104.16.1.1", decodedPy.cleanIp)
+        assertEquals("11111111-2222-3333-4444-555555555555", decodedPy.uuid)
+    }
+
+    @Test
+    fun `updateScriptWithProfile injects active config values into Python core`() {
+        val profile = ProxyProfile(
+            name = "Custom Node",
+            mode = TunnelMode.CL2_WSS,
+            uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            workerHost = "my-node.workers.dev",
+            workerUrl = "wss://my-node.workers.dev/ws",
+            cleanIp = "172.67.70.10",
+            subprotocol = "chat.v2",
+            listenHost = "127.0.0.1",
+            listenPort = 40446
+        )
+        val updated = PythonScriptBridge.updateScriptWithProfile(
+            PythonScriptBridge.DEFAULT_CL2_SCRIPT,
+            profile
+        )
+        val reparsed = PythonScriptBridge.parseScript(updated)
+        assertEquals("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", reparsed.uuid)
+        assertEquals("my-node.workers.dev", reparsed.workerHost)
+        assertEquals("wss://my-node.workers.dev/ws", reparsed.workerUrl)
+        assertEquals("172.67.70.10", reparsed.cleanIp)
+        assertEquals("127.0.0.1", reparsed.listenHost)
+        assertEquals(40446, reparsed.listenPort)
     }
 }

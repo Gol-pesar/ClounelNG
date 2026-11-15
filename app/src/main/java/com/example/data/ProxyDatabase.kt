@@ -97,6 +97,13 @@ interface ProxyProfileDao {
 
     @Delete
     suspend fun delete(entity: ProxyProfileEntity)
+
+    @Query(
+        "DELETE FROM proxy_profiles WHERE name = 'Cl2 Worker (Twilight-Dream)' " +
+            "OR uuid = '63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd' " +
+            "OR workerHost = 'twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev'"
+    )
+    suspend fun deleteLegacyDefaultConfigs()
 }
 
 @Database(entities = [ProxyProfileEntity::class], version = 1, exportSchema = false)
@@ -125,24 +132,11 @@ class ProxyProfileRepository(private val dao: ProxyProfileDao) {
     }
 
     suspend fun ensureSeeded(): Long {
-        if (dao.count() == 0) {
-            val defaultProfile = ProxyProfile(
-                name = "Cl2 Worker (Twilight-Dream)",
-                mode = TunnelMode.CL2_WSS,
-                uuid = "63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd",
-                workerHost = "twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev",
-                workerUrl = "wss://twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev/",
-                cleanIp = "172.67.70.244",
-                subprotocol = "chat.v2",
-                listenHost = "127.0.0.1",
-                listenPort = 40446,
-                maxChunk = 65536,
-                bufferMax = 4194304,
-                isDefault = true
-            )
-            return dao.insert(defaultProfile.toEntity())
-        }
         return -1L
+    }
+
+    suspend fun purgeLegacyDefaultConfigs() {
+        dao.deleteLegacyDefaultConfigs()
     }
 
     suspend fun saveProfile(profile: ProxyProfile): Long {

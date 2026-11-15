@@ -66,6 +66,20 @@ object ConfigShareCodec {
         }
     }
 
+    fun normalizeWorkerUrl(workerUrl: String): String {
+        val trimmed = workerUrl.trim()
+        if (trimmed.isEmpty()) return ""
+        val withWsScheme = when {
+            trimmed.startsWith("https://", ignoreCase = true) -> "wss://" + trimmed.substring(8)
+            trimmed.startsWith("http://", ignoreCase = true) -> "ws://" + trimmed.substring(7)
+            "://" in trimmed -> trimmed
+            else -> "wss://$trimmed"
+        }
+        val schemeIdx = withWsScheme.indexOf("://")
+        val afterScheme = if (schemeIdx >= 0) withWsScheme.substring(schemeIdx + 3) else withWsScheme
+        return if ("/" in afterScheme) withWsScheme else "$withWsScheme/"
+    }
+
     fun extractHostFromWorkerUrl(workerUrl: String): String {
         val trimmed = workerUrl.trim()
         if (trimmed.isEmpty()) return ""
@@ -97,12 +111,12 @@ object ConfigShareCodec {
             "Missing UUID or Worker URL"
         }
 
-        val finalUrl = workerUrl.ifBlank { "wss://$workerHost/" }
+        val finalUrl = normalizeWorkerUrl(workerUrl.ifBlank { "wss://$workerHost/" })
         return ProxyProfile(
             name = name,
             mode = TunnelMode.CL2_WSS,
             uuid = uuid.trim(),
-            workerHost = workerHost.trim(),
+            workerHost = workerHost.trim().ifBlank { extractHostFromWorkerUrl(finalUrl) },
             workerUrl = finalUrl.trim(),
             cleanIp = cleanIp.trim(),
             subprotocol = subproto.trim()
@@ -140,12 +154,13 @@ object ConfigShareCodec {
         require(uuid.isNotBlank() && (workerUrl.isNotBlank() || workerHost.isNotBlank())) {
             "Invalid JSON config: missing uuid or workerUrl"
         }
+        val finalUrl = normalizeWorkerUrl(workerUrl.ifBlank { "wss://$workerHost/" })
         return ProxyProfile(
             name = name,
             mode = TunnelMode.CL2_WSS,
             uuid = uuid,
-            workerHost = workerHost,
-            workerUrl = workerUrl.ifBlank { "wss://$workerHost/" },
+            workerHost = workerHost.ifBlank { extractHostFromWorkerUrl(finalUrl) },
+            workerUrl = finalUrl,
             cleanIp = cleanIp,
             subprotocol = obj.optString("subprotocol", "chat.v2").ifBlank { "chat.v2" }
         )

@@ -177,7 +177,7 @@ class PulseVpnService : VpnService() {
         telemetryJob = null
         stopTProxyAndInterface()
         ProxyEngineController.stopEngine()
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
@@ -250,7 +250,7 @@ class PulseVpnService : VpnService() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher_round)
+            .setSmallIcon(R.drawable.ic_clounel_notif)
             .setContentTitle(getString(R.string.notif_title_running))
             .setContentText(contentText)
             .setOngoing(true)

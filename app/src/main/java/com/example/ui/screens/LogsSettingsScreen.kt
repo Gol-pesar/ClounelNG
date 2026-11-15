@@ -21,7 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -48,6 +48,7 @@ import com.example.model.AppLanguage
 import com.example.model.LogLevel
 import com.example.ui.MainUiState
 import com.example.ui.UiStrings
+import com.example.ui.components.CautionNoteBanner
 import com.example.ui.theme.LocalPulseColors
 import com.example.ui.theme.MonoFontFamily
 
@@ -83,6 +84,10 @@ fun LogsSettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            item {
+                CautionNoteBanner(text = strings.cautionNote)
+            }
+
             // Battery Optimization Card
             item {
                 Card(
@@ -230,12 +235,14 @@ fun LogsSettingsScreen(
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                        // Preserved (hidden from main tabs) Python Studio entry
+                        // Preserved (hidden from main tabs & password-protected) Python Studio entry
                         OutlinedButton(
                             onClick = onOpenHiddenPythonStudio,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("open_python_studio_button")
                         ) {
-                            Icon(Icons.Rounded.Code, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(strings.hiddenPythonTitle)
                         }

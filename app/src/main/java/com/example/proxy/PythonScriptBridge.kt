@@ -21,10 +21,10 @@ try:
 except ImportError:
     pass
 
-UUID        = "63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd"
-WORKER_HOST = "twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev"
+UUID        = ""
+WORKER_HOST = ""
 WORKER_URL  = f"wss://{WORKER_HOST}/"
-CLEAN_IP    = "172.67.70.244"
+CLEAN_IP    = ""
 LISTEN      = ("127.0.0.1", 40446)
 SUBPROTO    = "chat.v2"
 MAX_CHUNK   = 65536
@@ -177,7 +177,7 @@ async def handler(r, w):
         except: pass
 
 async def main():
-    print(f"[*] ULTRA-Fast SOCKS5 Proxy 127.0.0.1:40446 -> {WORKER_HOST}")
+    print(f"[*] AMIR Mode Proxy {LISTEN[0]}:{LISTEN[1]} -> {WORKER_HOST}")
     srv = await asyncio.start_server(handler, LISTEN[0], LISTEN[1])
     async with srv: await srv.serve_forever()
 
@@ -187,13 +187,13 @@ if __name__ == "__main__":
 """.trimIndent()
 
     private val strVarRegex = { name: String ->
-        Regex("""^\s*$name\s*=\s*f?["']([^"']*)["']""", RegexOption.MULTILINE)
+        Regex("""^[ \t]*$name\s*=\s*f?["']([^"']*)["']""", RegexOption.MULTILINE)
     }
     private val intVarRegex = { name: String ->
-        Regex("""^\s*$name\s*=\s*(\d+)""", RegexOption.MULTILINE)
+        Regex("""^[ \t]*$name\s*=\s*(\d+)""", RegexOption.MULTILINE)
     }
     private val listenRegex = Regex(
-        """^\s*LISTEN\s*=\s*\(\s*["']([^"']+)["']\s*,\s*(\d+)\s*\)""",
+        """^[ \t]*LISTEN\s*=\s*\(\s*["']([^"']+)["']\s*,\s*(\d+)\s*\)""",
         RegexOption.MULTILINE
     )
 
@@ -226,8 +226,14 @@ if __name__ == "__main__":
     }
 
     fun applyConfigToProfile(base: ProxyProfile, parsed: ParsedPythonConfig): ProxyProfile {
-        val host = parsed.workerHost?.takeIf { it.isNotBlank() } ?: base.workerHost
-        val url = parsed.workerUrl?.takeIf { it.isNotBlank() } ?: "wss://$host/"
+        val rawUrl = parsed.workerUrl?.takeIf { it.isNotBlank() && !it.contains("{WORKER_HOST}") }
+        val host = parsed.workerHost?.takeIf { it.isNotBlank() }
+            ?: rawUrl?.let { ConfigShareCodec.extractHostFromWorkerUrl(it) }?.takeIf { it.isNotBlank() }
+            ?: base.workerHost
+        val url = ConfigShareCodec.normalizeWorkerUrl(
+            parsed.workerUrl?.takeIf { it.isNotBlank() && !it.contains("{WORKER_HOST}") }
+                ?: if (host.isNotBlank()) "wss://$host/" else base.workerUrl
+        )
         return base.copy(
             mode = TunnelMode.CL2_WSS,
             uuid = parsed.uuid?.takeIf { it.isNotBlank() } ?: base.uuid,
@@ -243,20 +249,42 @@ if __name__ == "__main__":
     }
 
     fun updateScriptWithProfile(script: String, profile: ProxyProfile): String {
-        var updated = script
-        updated = replaceOrKeep(updated, strVarRegex("UUID"), "UUID        = \"${profile.uuid}\"")
-        updated = replaceOrKeep(updated, strVarRegex("WORKER_HOST"), "WORKER_HOST = \"${profile.workerHost}\"")
-        updated = replaceOrKeep(updated, strVarRegex("CLEAN_IP"), "CLEAN_IP    = \"${profile.cleanIp}\"")
-        updated = replaceOrKeep(updated, strVarRegex("SUBPROTO"), "SUBPROTO    = \"${profile.subprotocol}\"")
+        val safeUuid = sanitizePyLiteral(profile.uuid)
+        val effectiveHost = sanitizePyLiteral(
+            profile.workerHost.trim().ifBlank { ConfigShareCodec.extractHostFromWorkerUrl(profile.workerUrl) }
+        )
+        val normalizedUrl = sanitizePyLiteral(ConfigShareCodec.normalizeWorkerUrl(profile.workerUrl))
+        val effectiveCleanIp = sanitizePyLiteral(profile.cleanIp.trim())
+        val effectiveSubproto = sanitizePyLiteral(profile.subprotocol.trim().ifBlank { "chat.v2" })
+        val effectiveListenHost = sanitizePyLiteral(profile.listenHost.trim().ifBlank { "127.0.0.1" })
+
+        val workerUrlLine = if (
+            normalizedUrl.isBlank() ||
+            (effectiveHost.isNotBlank() && (normalizedUrl == "wss://$effectiveHost/" || normalizedUrl == "wss://$effectiveHost"))
+        ) {
+            "WORKER_URL  = f\"wss://{WORKER_HOST}/\""
+        } else {
+            "WORKER_URL  = \"$normalizedUrl\""
+        }
+
+        var updated = script.ifBlank { DEFAULT_CL2_SCRIPT }
+        updated = replaceOrKeep(updated, strVarRegex("UUID"), "UUID        = \"$safeUuid\"")
+        updated = replaceOrKeep(updated, strVarRegex("WORKER_HOST"), "WORKER_HOST = \"$effectiveHost\"")
+        updated = replaceOrKeep(updated, strVarRegex("WORKER_URL"), workerUrlLine)
+        updated = replaceOrKeep(updated, strVarRegex("CLEAN_IP"), "CLEAN_IP    = \"$effectiveCleanIp\"")
+        updated = replaceOrKeep(updated, strVarRegex("SUBPROTO"), "SUBPROTO    = \"$effectiveSubproto\"")
         updated = replaceOrKeep(
             updated,
             listenRegex,
-            "LISTEN      = (\"${profile.listenHost}\", ${profile.listenPort})"
+            "LISTEN      = (\"$effectiveListenHost\", ${profile.listenPort})"
         )
         updated = replaceOrKeep(updated, intVarRegex("MAX_CHUNK"), "MAX_CHUNK   = ${profile.maxChunk}")
         updated = replaceOrKeep(updated, intVarRegex("BUFFER_MAX"), "BUFFER_MAX  = ${profile.bufferMax}  # ${profile.bufferMax / (1024 * 1024)}MB")
         return updated
     }
+
+    private fun sanitizePyLiteral(value: String): String =
+        value.replace("\\", "").replace("\"", "").replace("\n", "").replace("\r", "")
 
     private fun replaceOrKeep(source: String, regex: Regex, replacement: String): String {
         return if (regex.containsMatchIn(source)) {

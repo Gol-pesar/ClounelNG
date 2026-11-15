@@ -32,7 +32,30 @@ object ProxyEngineController : TelemetrySink {
     private var server: Socks5ProxyServer? = null
     private var tickerJob: Job? = null
 
-    private val activeConnMap = ConcurrentHashMap<Long, ActiveConnectionInfo>()
+    private class MutableConnInfo(
+        val id: Long,
+        val targetHost: String,
+        val targetPort: Int,
+        val protocolLabel: String,
+        val startedAtMs: Long,
+        val handshakeMs: Long
+    ) {
+        val bytesUp = AtomicLong(0L)
+        val bytesDown = AtomicLong(0L)
+
+        fun snapshot() = ActiveConnectionInfo(
+            id = id,
+            targetHost = targetHost,
+            targetPort = targetPort,
+            protocolLabel = protocolLabel,
+            bytesUp = bytesUp.get(),
+            bytesDown = bytesDown.get(),
+            startedAtMs = startedAtMs,
+            handshakeMs = handshakeMs
+        )
+    }
+
+    private val activeConnMap = ConcurrentHashMap<Long, MutableConnInfo>()
     private val totalUp = AtomicLong(0L)
     private val totalDown = AtomicLong(0L)
     private val totalConnCount = AtomicLong(0L)
@@ -146,6 +169,7 @@ object ProxyEngineController : TelemetrySink {
                 val connsSnapshot = activeConnMap.values
                     .sortedByDescending { it.startedAtMs }
                     .take(25)
+                    .map { it.snapshot() }
 
                 _telemetry.update { prev ->
                     val history = (prev.trafficHistory + sample).takeLast(45)
@@ -184,13 +208,11 @@ object ProxyEngineController : TelemetrySink {
         handshakeMs: Long
     ) {
         totalConnCount.incrementAndGet()
-        activeConnMap[id] = ActiveConnectionInfo(
+        activeConnMap[id] = MutableConnInfo(
             id = id,
             targetHost = host,
             targetPort = port,
             protocolLabel = protocol,
-            bytesUp = 0L,
-            bytesDown = 0L,
             startedAtMs = System.currentTimeMillis(),
             handshakeMs = handshakeMs
         )
@@ -200,12 +222,9 @@ object ProxyEngineController : TelemetrySink {
     override fun onBytesTransferred(connectionId: Long, bytesUp: Long, bytesDown: Long) {
         if (bytesUp > 0L) totalUp.addAndGet(bytesUp)
         if (bytesDown > 0L) totalDown.addAndGet(bytesDown)
-        activeConnMap.computeIfPresent(connectionId) { _, old ->
-            old.copy(
-                bytesUp = old.bytesUp + bytesUp,
-                bytesDown = old.bytesDown + bytesDown
-            )
-        }
+        val entry = activeConnMap[connectionId] ?: return
+        if (bytesUp > 0L) entry.bytesUp.addAndGet(bytesUp)
+        if (bytesDown > 0L) entry.bytesDown.addAndGet(bytesDown)
     }
 
     override fun onConnectionClosed(id: Long) {

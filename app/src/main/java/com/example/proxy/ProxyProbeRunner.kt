@@ -93,7 +93,8 @@ object ProxyProbeRunner {
             try {
                 val (initPacket, key) = Cl2Crypto.buildInit(profile.uuid, "1.1.1.1", 443)
                 check(ws.sendBinary(initPacket)) { "Failed sending Cl2 init frame" }
-                val ack = withTimeout(10_000) { ws.incoming.receive() }
+                val ack = ws.readMessage(timeoutMs = 10_000)
+                    ?: throw IllegalStateException("Connection closed before HMAC ACK")
                 check(Cl2Crypto.verifyAck(ack, key)) { "HMAC ACK verification failed" }
                 (System.currentTimeMillis() - started).coerceAtLeast(1L)
             } finally {

@@ -27,6 +27,11 @@ class PreferencesRepository(private val context: Context) {
         val AUTO_FALLBACK_CLEAN_IP = booleanPreferencesKey("auto_fallback_clean_ip")
         val TCP_NO_DELAY = booleanPreferencesKey("tcp_no_delay")
         val PYTHON_SCRIPT = stringPreferencesKey("python_script")
+        val LEGACY_DEFAULT_PURGED = booleanPreferencesKey("legacy_default_purged_v2")
+    }
+
+    val isLegacyDefaultPurged: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LEGACY_DEFAULT_PURGED] ?: false
     }
 
     val activeProfileId: Flow<Long> = context.dataStore.data.map { prefs ->
@@ -83,5 +88,9 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun savePythonScript(script: String) {
         context.dataStore.edit { it[Keys.PYTHON_SCRIPT] = script }
+    }
+
+    suspend fun markLegacyDefaultPurged() {
+        context.dataStore.edit { it[Keys.LEGACY_DEFAULT_PURGED] = true }
     }
 }

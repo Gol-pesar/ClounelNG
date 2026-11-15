@@ -49,8 +49,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _editorScript = MutableStateFlow(PythonScriptBridge.DEFAULT_CL2_SCRIPT)
 
     init {
-        viewModelScope.launch {
-            profileRepo.purgeLegacyDefaultConfigs()
+        app.applicationScope.launch {
+            if (!prefsRepo.isLegacyDefaultPurged.first()) {
+                profileRepo.purgeLegacyDefaultConfigs()
+                prefsRepo.markLegacyDefaultPurged()
+            }
             val savedScript = prefsRepo.pythonScript.first()
             val profiles = profileRepo.profiles.first()
             val activeId = prefsRepo.activeProfileId.first()
@@ -103,7 +106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
+        started = SharingStarted.Eagerly,
         initialValue = MainUiState()
     )
 
@@ -131,7 +134,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectProfile(context: Context, profile: ProxyProfile) {
-        viewModelScope.launch {
+        app.applicationScope.launch {
             prefsRepo.setActiveProfileId(profile.id)
             val synced = PythonScriptBridge.updateScriptWithProfile(_editorScript.value, profile)
             _editorScript.value = synced
@@ -143,12 +146,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveProfile(context: Context, profile: ProxyProfile, activateImmediately: Boolean = true) {
-        viewModelScope.launch {
+        app.applicationScope.launch {
             val hadNoActive = uiState.value.activeProfile == null
-            val savedId = profileRepo.saveProfile(profile)
+            val cleanProfile = profile.copy(isDefault = false)
+            val savedId = profileRepo.saveProfile(cleanProfile)
             if (activateImmediately || hadNoActive) {
                 prefsRepo.setActiveProfileId(savedId)
-                val updated = profile.copy(id = savedId)
+                val updated = cleanProfile.copy(id = savedId)
                 val synced = PythonScriptBridge.updateScriptWithProfile(_editorScript.value, updated)
                 _editorScript.value = synced
                 prefsRepo.savePythonScript(synced)
@@ -160,7 +164,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteProfile(context: Context, profile: ProxyProfile) {
-        viewModelScope.launch {
+        app.applicationScope.launch {
             val wasActive = uiState.value.activeProfile?.id == profile.id
             profileRepo.deleteProfile(profile)
             val remaining = profileRepo.profiles.first()
@@ -186,7 +190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updatePythonScriptDraft(newScript: String) {
         _editorScript.value = newScript
-        viewModelScope.launch {
+        app.applicationScope.launch {
             prefsRepo.savePythonScript(newScript)
         }
     }
@@ -202,7 +206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         startImmediately: Boolean,
         onApplied: (() -> Unit)? = null
     ) {
-        viewModelScope.launch {
+        app.applicationScope.launch {
             val script = _editorScript.value
             prefsRepo.savePythonScript(script)
             val parsed = PythonScriptBridge.parseScript(script)
@@ -216,7 +220,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val current = existing ?: ProxyProfile(
                 name = parsed.workerHost?.takeIf { it.isNotBlank() } ?: "AMIR Config"
             )
-            val updated = PythonScriptBridge.applyConfigToProfile(current, parsed)
+            val updated = PythonScriptBridge.applyConfigToProfile(current, parsed).copy(isDefault = false)
             val savedId = profileRepo.saveProfile(updated)
             val savedProfile = updated.copy(id = savedId)
             prefsRepo.setActiveProfileId(savedId)
@@ -232,7 +236,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (startImmediately) {
                 startSelectedEngine(context)
             }
-            onApplied?.invoke()
+            if (onApplied != null) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onApplied()
+                }
+            }
         }
     }
 
@@ -245,9 +253,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val result = ConfigShareCodec.decodeFromText(rawText)
         result.fold(
             onSuccess = { imported ->
-                viewModelScope.launch {
-                    val savedId = profileRepo.saveProfile(imported)
-                    val saved = imported.copy(id = savedId)
+                val cleanImported = imported.copy(isDefault = false)
+                app.applicationScope.launch {
+                    val savedId = profileRepo.saveProfile(cleanImported)
+                    val saved = cleanImported.copy(id = savedId)
                     prefsRepo.setActiveProfileId(savedId)
                     val synced = PythonScriptBridge.updateScriptWithProfile(_editorScript.value, saved)
                     _editorScript.value = synced
@@ -255,7 +264,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (ProxyEngineController.telemetry.value.status == EngineStatus.RUNNING) {
                         startSelectedEngine(context)
                     }
-                    onSuccess(saved)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onSuccess(saved)
+                    }
                 }
             },
             onFailure = { err ->

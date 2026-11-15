@@ -99,9 +99,7 @@ interface ProxyProfileDao {
     suspend fun delete(entity: ProxyProfileEntity)
 
     @Query(
-        "DELETE FROM proxy_profiles WHERE name = 'Cl2 Worker (Twilight-Dream)' " +
-            "OR uuid = '63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd' " +
-            "OR workerHost = 'twilight-dream-9e3c.aliahmadiphotoofficial.workers.dev'"
+        "DELETE FROM proxy_profiles WHERE isDefault = 1 AND name = 'Cl2 Worker (Twilight-Dream)'"
     )
     suspend fun deleteLegacyDefaultConfigs()
 }
@@ -120,7 +118,10 @@ abstract class ProxyDatabase : RoomDatabase() {
                     context.applicationContext,
                     ProxyDatabase::class.java,
                     "pulse_proxy.db"
-                ).build().also { instance = it }
+                )
+                    .setJournalMode(JournalMode.TRUNCATE)
+                    .build()
+                    .also { instance = it }
             }
         }
     }

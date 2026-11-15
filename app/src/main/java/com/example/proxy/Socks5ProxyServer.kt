@@ -5,16 +5,14 @@ import com.example.model.LogLevel
 import com.example.model.ProxyProfile
 import com.example.model.TunnelMode
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
@@ -26,6 +24,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
 interface TelemetrySink {
@@ -44,7 +43,9 @@ class Socks5ProxyServer(
     private val settings: EngineSettings,
     private val sink: TelemetrySink
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val ioExecutor = Executors.newCachedThreadPool()
+    private val ioDispatcher = ioExecutor.asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private var socksServerSocket: ServerSocket? = null
     private var httpServerSocket: ServerSocket? = null
     private var acceptJob: Job? = null
@@ -122,6 +123,7 @@ class Socks5ProxyServer(
         acceptJob?.cancel()
         httpAcceptJob?.cancel()
         scope.cancel()
+        runCatching { ioExecutor.shutdownNow() }
         sink.onLog(LogLevel.INFO, "[*] Proxy server stopped")
     }
 
@@ -139,7 +141,7 @@ class Socks5ProxyServer(
         try {
             tuneSocket(client)
             client.soTimeout = 10_000
-            val input = DataInputStream(BufferedInputStream(client.getInputStream(), 8192))
+            val input = DataInputStream(BufferedInputStream(client.getInputStream(), 65536))
             val output = client.getOutputStream()
 
             // 1. Greeting: VER, NMETHODS, METHODS...
@@ -224,7 +226,7 @@ class Socks5ProxyServer(
         try {
             tuneSocket(client)
             client.soTimeout = 10_000
-            val input = BufferedInputStream(client.getInputStream(), 8192)
+            val input = BufferedInputStream(client.getInputStream(), 65536)
             val output = client.getOutputStream()
 
             val headerBytes = readHttpHeaderBlock(input) ?: return
@@ -325,9 +327,8 @@ class Socks5ProxyServer(
                 throw IOException("Failed sending Cl2 init frame")
             }
 
-            val ack = withTimeout(10_000) {
-                ws.incoming.receive()
-            }
+            val ack = ws.readMessage(timeoutMs = 10_000)
+                ?: throw IOException("Cl2 handshake closed before ACK")
             if (!Cl2Crypto.verifyAck(ack, key)) {
                 throw IOException("Invalid Cl2 HMAC handshake ACK from ${profile.workerHost}")
             }
@@ -337,8 +338,7 @@ class Socks5ProxyServer(
             sink.onConnectionOpened(connId, targetHost, targetPort, protocolLabel, handshakeMs)
             sink.onLog(LogLevel.INFO, "$protocolLabel $targetHost:$targetPort (${handshakeMs}ms)")
 
-            val chunkSize = profile.maxChunk.coerceIn(4096, 262144)
-            val bufferedOut = BufferedOutputStream(clientOutput, chunkSize)
+            val chunkSize = profile.maxChunk.coerceIn(16384, 262144)
 
             coroutineScope {
                 val upJob = launch {
@@ -360,12 +360,13 @@ class Socks5ProxyServer(
 
                 val downJob = launch {
                     try {
-                        for (msg in ws.incoming) {
+                        while (isActive) {
+                            val msg = ws.readMessage() ?: break
                             if (msg.isNotEmpty()) {
                                 Cl2Crypto.xorInPlace(msg, msg.size, key)
-                                bufferedOut.write(msg)
-                                if (ws.incoming.isEmpty) {
-                                    bufferedOut.flush()
+                                clientOutput.write(msg)
+                                if (!ws.hasBufferedInput()) {
+                                    clientOutput.flush()
                                 }
                                 sink.onBytesTransferred(connId, 0L, msg.size.toLong())
                             }
@@ -373,7 +374,7 @@ class Socks5ProxyServer(
                     } catch (_: Exception) {
                         // Downstream closed
                     } finally {
-                        runCatching { bufferedOut.flush() }
+                        runCatching { clientOutput.flush() }
                         runCatching { clientOutput.close() }
                     }
                 }

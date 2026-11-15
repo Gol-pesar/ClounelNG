@@ -9,6 +9,11 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.ProxyDatabase
+import com.example.data.ProxyProfileRepository
+import com.example.proxy.ConfigShareCodec
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -66,5 +71,25 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("caution_note_banner").assertIsDisplayed()
         composeTestRule.onNodeWithTag("python_studio_list").performScrollToIndex(2)
         composeTestRule.onNodeWithTag("python_code_editor").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun `user imported configs persist across restarts even with custom worker host`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = ProxyDatabase.getInstance(context)
+        val repo = ProxyProfileRepository(db.profileDao())
+
+        val imported = ConfigShareCodec.decodeFromText(
+            "amir://cl2?uuid=63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd&url=wss%3A%2F%2Ftwilight-dream-9e3c.aliahmadiphotoofficial.workers.dev%2F&cleanIp=172.67.70.244&name=My+Worker"
+        ).getOrThrow().copy(isDefault = false)
+
+        repo.saveProfile(imported)
+        repo.purgeLegacyDefaultConfigs()
+
+        val saved = repo.profiles.first()
+        assertEquals(1, saved.size)
+        assertEquals("My Worker", saved.first().name)
+        assertEquals("63ae8279-fafa-4dd0-b2ef-9d6a4ec3ffdd", saved.first().uuid)
+        repo.deleteProfile(saved.first())
     }
 }
